@@ -1446,7 +1446,19 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- 基础设施 ---------------------------------------------------------
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
+        """把东西发出去。
+
+        注意：**字符串原样发，不要 JSON 编码**。以前这里对任何非 bytes 都 json.dumps，
+        于是 ui.html 被当成 JSON 字符串发出去（开头多个引号、换行变成字面 \\n、引号变成
+        \\"），浏览器把整页当纯文本渲染 —— 表现就是「页面没有 CSS」。Nimbus 那边一直是
+        分类型处理的，所以只有 Steward 中招。
+        """
+        if isinstance(body, bytes):
+            data = body
+        elif isinstance(body, str):
+            data = body.encode("utf-8")
+        else:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))

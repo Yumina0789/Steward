@@ -88,7 +88,17 @@ try:
     ok(json.loads(body)["need_setup"] is False, "现在 need_setup 变成 false 了")
 
     print("== 接口（用会话令牌） ==")
-    for path, want in [("/", 200), ("/api/meta", 200), ("/api/overview", 200),
+    # 页面本身要单独查内容：只查状态码是不够的（曾经整页被 JSON 编码后发出去，
+    # 浏览器当纯文本渲染，表现就是"没有 CSS"，而状态码一直是 200）
+    st, body = call("/")
+    page = body.decode("utf-8", "replace")
+    ok(st == 200 and page.lstrip().lower().startswith("<!doctype html>"),
+       "GET / 返回的是 HTML（不是被 JSON 编码的字符串）")
+    ok(page.rstrip().endswith("</html>") and "<style>" in page and ":root{" in page,
+       "页面完整：有结尾、有 <style> 与 :root 变量")
+    ok('data-tab="accounts"' in page, "账户页签在页面里")
+
+    for path, want in [("/api/meta", 200), ("/api/overview", 200),
                        ("/api/services", 200), ("/api/service?unit=ssh.service", 200),
                        ("/api/service/logs?unit=ssh.service", 200), ("/api/docker", 200),
                        ("/api/docker/images", 200), ("/api/docker/logs?name=kms", 200),
