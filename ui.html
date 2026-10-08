@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Steward 服务器面板</title>
+<style>
+  :root{
+    --bg:#f2f8ff;--bg2:#e4f1ff;--panel:rgba(255,255,255,.74);--panel2:rgba(255,255,255,.5);
+    --line:rgba(28,120,220,.16);--text:#0f2436;--dim:#5c7c99;--accent:#1f9dff;--accent2:#63cbff;
+    --on-accent:#fff;--ok:#12a150;--warn:#c07d00;--bad:#e5484d;--r:12px;--gap:12px;
+    --blur:saturate(170%) blur(14px);--shadow:0 8px 26px rgba(24,90,160,.10);
+  }
+  :root[data-theme=dark]{
+    --bg:#0a1420;--bg2:#0d1f30;--panel:rgba(19,33,48,.72);--panel2:rgba(24,42,60,.5);
+    --line:rgba(120,190,255,.16);--text:#e7f2ff;--dim:#8fb1cd;--accent:#3aa7ff;--accent2:#6ed0ff;
+    --on-accent:#04212f;--ok:#3ddc84;--warn:#ffc14d;--bad:#ff6b6b;--shadow:0 8px 26px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{min-height:100vh;color:var(--text);font:14px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:linear-gradient(160deg,var(--bg),var(--bg2)) fixed;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent)}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
+  .ico{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.8;
+       stroke-linecap:round;stroke-linejoin:round}
+  .glass{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+         -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);box-shadow:var(--shadow)}
+  .hidden{display:none!important}
+
+  header{position:sticky;top:0;z-index:20;padding:10px 0 0}
+  .hbar{margin:0 14px;padding:9px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .brand{font-weight:700;letter-spacing:.3px}
+  .brand small{font-weight:400;color:var(--dim);margin-left:6px;letter-spacing:0}
+  .grow{flex:1 1 auto}
+  .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;
+        padding:3px 10px;font-size:12px;color:var(--dim);background:var(--panel2)}
+  .pill.ok{color:var(--ok);border-color:currentColor}
+  .pill.bad{color:var(--bad);border-color:currentColor}
+  .pill .ico{width:12px;height:12px}
+  nav{margin:8px 14px 0;display:flex;gap:4px;padding:5px;overflow-x:auto}
+  nav button{display:inline-flex;align-items:center;gap:6px;background:none;border:1px solid transparent;
+             border-radius:9px;color:var(--dim);padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;
+             white-space:nowrap;transition:.15s}
+  nav button:hover{color:var(--text);background:var(--panel2)}
+  nav button.active{color:var(--on-accent);font-weight:600;background:linear-gradient(135deg,var(--accent2),var(--accent));
+                    box-shadow:0 5px 16px rgba(31,157,255,.28)}
+  main{max-width:1280px;margin:0 auto;padding:14px 14px 60px}
+
+  .panel{padding:12px 14px;margin-bottom:var(--gap)}
+  .panel>h2{font-size:13px;font-weight:650;margin:0 0 11px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .panel>h2 .ico{color:var(--accent)}
+  .panel>h2 .q{font-weight:400;color:var(--dim);font-size:12px}
+  .panel>h2 .end{margin-left:auto;font-weight:400;font-size:12px;color:var(--dim)}
+  .grid{display:grid;gap:10px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+
+  .stat{padding:10px 12px}
+  .stat .k{color:var(--dim);font-size:12px;display:flex;align-items:center;gap:6px}
+  .stat .k .ico{width:13px;height:13px;color:var(--accent)}
+  .stat .v{font-size:20px;font-weight:700;line-height:1.3;margin-top:1px}
+  .stat .n{color:var(--dim);font-size:11.5px}
+  .ok-v{color:var(--ok)}.bad-v{color:var(--bad)}.warn-v{color:var(--warn)}
+
+  .bar{height:6px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .4s}
+  .bar.warn>i{background:linear-gradient(90deg,#ffd166,var(--warn))}
+  .bar.bad>i{background:linear-gradient(90deg,#ff9a9a,var(--bad))}
+
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    padding:6px 9px;border-radius:8px;font:inherit;font-size:12.5px}
+  input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(31,157,255,.14)}
+  input[type=text],input[type=password]{min-width:180px}
+  button.act{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;
+    border:1px solid transparent;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;
+    color:var(--on-accent);background:linear-gradient(135deg,var(--accent2),var(--accent));
+    box-shadow:0 4px 14px rgba(31,157,255,.24);transition:.15s}
+  button.act:hover{transform:translateY(-1px)}
+  button.act.ghost{background:var(--panel2);color:var(--text);border-color:var(--line);font-weight:500;box-shadow:none}
+  button.act.ghost:hover{background:var(--panel)}
+  button.act.danger{background:var(--panel2);color:var(--bad);border-color:var(--line);font-weight:500;box-shadow:none}
+  button.act:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  button.mini{height:24px;padding:0 8px;font-size:11.5px;border-radius:7px;box-shadow:none}
+  button.act .ico{width:14px;height:14px}
+
+  .scroll{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel2)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--dim);font-weight:600;background:var(--panel);position:sticky;top:0;
+     -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);z-index:1}
+  tbody tr:hover{background:var(--panel)}
+  tbody tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right}
+  td.wrap{white-space:normal;word-break:break-all}
+  .tag{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;font-size:11.5px;
+       border:1px solid currentColor}
+  .tag.ok{color:var(--ok)}.tag.bad{color:var(--bad)}.tag.warn{color:var(--warn)}.tag.info{color:var(--accent)}
+  .tag.mute{color:var(--dim)}
+  .hint{color:var(--dim);font-size:12px}
+  .empty{padding:16px;color:var(--dim)}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;
+      overflow:auto;font-size:12px;margin:0;max-height:340px;white-space:pre-wrap;word-break:break-all}
+  .logbox{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:var(--r);
+          background:var(--panel2);padding:8px 10px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+  .logline{display:flex;gap:8px;padding:1px 0;color:var(--text)}
+  .logline .t{color:var(--dim);flex:0 0 130px}
+  .logline.warn span:last-child{color:var(--warn)}
+  .logline.ok span:last-child{color:var(--ok)}
+  .kv{display:grid;grid-template-columns:96px 1fr;gap:5px 12px;font-size:12.5px}
+  .kv .k{color:var(--dim)}
+  .kv .v{overflow-wrap:anywhere}
+  .spark{width:100%;height:44px;display:block}
+  .flash{animation:flash .8s}
+  @keyframes flash{from{background:rgba(31,157,255,.18)}to{background:transparent}}
+
+  #login{position:fixed;inset:0;z-index:90;display:grid;place-items:center;
+         background:rgba(240,248,255,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  :root[data-theme=dark] #login{background:rgba(6,14,22,.72)}
+  #login .box{width:min(430px,92vw);padding:18px}
+  #login code{font-size:11px;overflow-wrap:anywhere;color:var(--text)}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,140%);z-index:95;
+         display:flex;align-items:center;gap:8px;padding:10px 16px;font-size:13px;transition:.25s;max-width:92vw}
+  .toast.show{transform:translate(-50%,0)}
+  .toast.err{color:var(--bad)}
+  .toast .ico{color:var(--ok)}
+  .toast.err .ico{color:var(--bad)}
+  @media (max-width:700px){ .hbar{margin:0 8px} nav{margin:6px 8px 0} main{padding:10px 8px 50px} }
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M12 14l4-4"/><path d="M4 18a9 9 0 1 1 16 0"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+  <symbol id="i-mem" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 17v3M12 17v3M17 17v3"/></symbol>
+  <symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-net" viewBox="0 0 24 24"><path d="M12 20v-6"/><path d="M5 10a10 10 0 0 1 14 0"/><path d="M8 13a6 6 0 0 1 8 0"/><circle cx="12" cy="17" r="1"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2-5 3 10 2-5h7"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v6M15 3v6"/><path d="M6 9h12v3a6 6 0 0 1-12 0z"/><path d="M12 18v3"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></symbol>
+  <symbol id="i-x-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l12 8-12 8z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v5h-5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.3-4.3"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14a8 8 0 1 1-10-10 7 7 0 0 0 10 10z"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8l-4 4 4 4M6 12h9"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M17 11a3 3 0 0 0 0-6"/><path d="M18 20a5.5 5.5 0 0 0-2-4"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M6 18L18 6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.7 5.6L4 16"/><path d="M4 20v-4h4"/></symbol>
+</svg>
+
+<div id="login" class="hidden">
+  <div class="box glass">
+    <h2 style="margin:0 0 12px;display:flex;align-items:center;gap:8px">
+      <svg class="ico"><use href="#i-shield"/></svg>Steward 服务器面板</h2>
+    <label style="font-size:12px;color:var(--dim)">访问 token</label>
+    <input id="loginToken" type="password" style="width:100%;margin:6px 0" placeholder="启动时终端输出的那串 token">
+    <div class="hint">在服务器上取：<code class="mono">cat /var/lib/steward/steward.token</code><br>
+      更省事：用带 token 的地址打开，例如 <code class="mono">http://127.0.0.1:8402/?token=这串</code>，
+      登录状态会记在这个浏览器里。<br>
+      对外访问建议走 SSH 隧道：<code class="mono">ssh -L 8402:127.0.0.1:8402 root@这台机器</code></div>
+    <div class="row" style="margin-top:12px">
+      <button class="act" onclick="doLogin()" style="flex:1;justify-content:center">
+        <svg class="ico"><use href="#i-check"/></svg>登录</button>
+    </div>
+    <div id="loginErr" class="hint bad-v" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<header>
+  <div class="hbar glass">
+    <div class="brand">Steward<small id="modeLine">加载中…</small></div>
+    <span class="pill" id="hPill"><svg class="ico"><use href="#i-pulse"/></svg>…</span>
+    <span class="pill" id="hHost">–</span>
+    <span class="pill" id="hUp">–</span>
+    <div class="grow"></div>
+    <button class="act ghost mini" onclick="refreshNow(this)"><svg class="ico"><use href="#i-refresh"/></svg>刷新</button>
+    <button class="act ghost mini" id="themeBtn" onclick="toggleTheme()"></button>
+    <button class="act ghost mini" onclick="logout()"><svg class="ico"><use href="#i-logout"/></svg>退出</button>
+  </div>
+  <nav class="glass">
+    <button data-tab="overview" class="active"><svg class="ico"><use href="#i-gauge"/></svg>概览</button>
+    <button data-tab="services"><svg class="ico"><use href="#i-server"/></svg>服务</button>
+    <button data-tab="docker"><svg class="ico"><use href="#i-box"/></svg>Docker</button>
+    <button data-tab="security"><svg class="ico"><use href="#i-shield"/></svg>安全</button>
+    <button data-tab="net"><svg class="ico"><use href="#i-plug"/></svg>端口 · 进程</button>
+    <button data-tab="logs"><svg class="ico"><use href="#i-file"/></svg>日志</button>
+    <button data-tab="actions"><svg class="ico"><use href="#i-list"/></svg>操作 · 审计</button>
+  </nav>
+</header>
+
+<main>
+  <!-- 概览 -->
+  <section id="tab-overview">
+    <div class="grid g4" style="margin-bottom:var(--gap)">
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-cpu"/></svg>CPU</div>
+        <div class="v" id="ovCpu">–</div><div class="n" id="ovCpuSub">–</div>
+        <div class="bar" id="ovCpuBar"><i style="width:0"></i></div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-mem"/></svg>内存</div>
+        <div class="v" id="ovMem">–</div><div class="n" id="ovMemSub">–</div>
+        <div class="bar" id="ovMemBar"><i style="width:0"></i></div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-disk"/></svg>根分区</div>
+        <div class="v" id="ovDisk">–</div><div class="n" id="ovDiskSub">–</div>
+        <div class="bar" id="ovDiskBar"><i style="width:0"></i></div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-net"/></svg>网络</div>
+        <div class="v" id="ovNet" style="font-size:15px">–</div><div class="n" id="ovNetSub">–</div></div>
+    </div>
+    <div class="grid g4" style="margin-bottom:var(--gap)">
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-pulse"/></svg>负载</div>
+        <div class="v" style="font-size:16px" id="ovLoad">–</div><div class="n" id="ovCore">–</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-list"/></svg>进程</div>
+        <div class="v" id="ovProcs">–</div><div class="n" id="ovZombie">–</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-server"/></svg>服务</div>
+        <div class="v" id="ovSvc">–</div><div class="n" id="ovSvcSub">–</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-shield"/></svg>登录失败</div>
+        <div class="v" id="ovSec">–</div><div class="n" id="ovSecSub">–</div></div>
+    </div>
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-pulse"/></svg>实时曲线
+        <span class="q">CPU 与网络，每 <span id="ovInt">2</span> 秒采样一次</span>
+        <span class="end" id="ovSparkLegend"></span></h2>
+      <svg class="spark" id="ovSpark" viewBox="0 0 600 44" preserveAspectRatio="none">
+        <polyline id="spCpu" fill="none" stroke="var(--accent)" stroke-width="1.6" points=""></polyline>
+        <polyline id="spNet" fill="none" stroke="var(--ok)" stroke-width="1.2" points=""></polyline>
+      </svg>
+      <div class="hint">蓝 = CPU 使用率（0–100%）　绿 = 网络流量（自动缩放）</div>
+    </div>
+    <div class="grid g2">
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-disk"/></svg>磁盘</h2>
+        <div class="scroll"><table><thead><tr><th>挂载点</th><th>设备</th><th class="num">已用</th>
+          <th class="num">占比</th><th class="num">inode</th></tr></thead><tbody id="ovDiskList"></tbody></table></div>
+      </div>
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-server"/></svg>主机信息</h2>
+        <div class="kv" id="ovInfo"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 服务 -->
+  <section id="tab-services" class="hidden">
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-server"/></svg>systemd 服务
+        <span class="q">点一行看详情与日志；启停走白名单动作，会写审计</span>
+        <span class="end" id="svcMeta"></span></h2>
+      <div class="toolbar">
+        <input id="svcQ" type="text" placeholder="过滤单元名或描述" oninput="filterUnits()">
+        <select id="svcOnly" onchange="filterUnits()">
+          <option value="">全部</option><option value="active">只看运行中</option>
+          <option value="failed">只看失败</option>
+        </select>
+        <button class="act ghost" onclick="loadServices()"><svg class="ico"><use href="#i-refresh"/></svg>刷新</button>
+      </div>
+      <div class="scroll"><table><thead><tr><th>单元</th><th>状态</th><th>子状态</th><th>说明</th>
+        <th class="num">操作</th></tr></thead><tbody id="svcBody"></tbody></table></div>
+    </div>
+    <div class="panel glass hidden" id="svcPanel">
+      <h2><svg class="ico"><use href="#i-server"/></svg><span id="svcTitle">–</span>
+        <span class="q" id="svcDesc"></span></h2>
+      <div class="row" style="margin-bottom:10px" id="svcActions"></div>
+      <div class="kv" id="svcKv" style="margin-bottom:10px"></div>
+      <h2 style="margin-top:12px"><svg class="ico"><use href="#i-file"/></svg>日志</h2>
+      <div class="logbox" id="svcLogs"></div>
+    </div>
+  </section>
+
+  <!-- Docker -->
+  <section id="tab-docker" class="hidden">
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-box"/></svg>Docker 容器
+        <span class="q">docker ps + docker stats（stats 有缓存，不会每次刷新都等）</span>
+        <span class="end" id="dkMeta"></span></h2>
+      <div class="row" style="margin-bottom:10px">
+        <button class="act ghost" onclick="loadDocker()"><svg class="ico"><use href="#i-refresh"/></svg>刷新</button>
+        <button class="act ghost" onclick="loadImages()"><svg class="ico"><use href="#i-list"/></svg>镜像</button>
+        <button class="act danger" onclick="runAction('docker.prune_images',{})">
+          <svg class="ico"><use href="#i-x-circle"/></svg>清理无标签镜像</button>
+      </div>
+      <div class="scroll"><table><thead><tr><th>容器</th><th>状态</th><th>镜像</th><th>CPU</th><th>内存</th>
+        <th>网络 I/O</th><th class="num">操作</th></tr></thead><tbody id="dkBody"></tbody></table></div>
+      <div class="hidden" id="dkImagesWrap" style="margin-top:12px">
+        <h2><svg class="ico"><use href="#i-list"/></svg>镜像</h2>
+        <div class="scroll" style="max-height:260px"><table><thead><tr><th>仓库</th><th>标签</th><th>ID</th>
+          <th>大小</th><th>创建</th></tr></thead><tbody id="dkImages"></tbody></table></div>
+      </div>
+    </div>
+    <div class="panel glass hidden" id="dkPanel">
+      <h2><svg class="ico"><use href="#i-file"/></svg>容器日志：<span id="dkTitle">–</span></h2>
+      <div class="logbox" id="dkLogs"></div>
+    </div>
+  </section>
+
+  <!-- 安全 -->
+  <section id="tab-security" class="hidden">
+    <div class="grid g4" style="margin-bottom:var(--gap)">
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-ban"/></svg>登录失败</div>
+        <div class="v" id="seFailed">–</div><div class="n">来自 auth.log</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-check"/></svg>登录成功</div>
+        <div class="v" id="seOk">–</div><div class="n">最近的会列在下面</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-shield"/></svg>防火墙</div>
+        <div class="v" style="font-size:16px" id="seUfwV">–</div><div class="n" id="seUfwN">–</div></div>
+      <div class="stat glass"><div class="k"><svg class="ico"><use href="#i-alert"/></svg>fail2ban</div>
+        <div class="v" style="font-size:16px" id="seF2bV">–</div><div class="n" id="seF2bN">–</div></div>
+    </div>
+    <div class="grid g2" style="margin-bottom:var(--gap)">
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-ban"/></svg>失败来源排行
+          <span class="q">点 IP 可以直接封禁（会二次确认）</span></h2>
+        <div class="scroll" style="max-height:260px"><table><thead><tr><th>来源 IP</th><th class="num">次数</th>
+          <th class="num">处置</th></tr></thead><tbody id="seIPs"></tbody></table></div>
+        <h2 style="margin-top:12px"><svg class="ico"><use href="#i-users"/></svg>被猜的用户名</h2>
+        <div class="scroll" style="max-height:200px"><table><thead><tr><th>用户名</th><th class="num">次数</th>
+          </tr></thead><tbody id="seUsers"></tbody></table></div>
+      </div>
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-alert"/></svg>最近失败明细
+          <span class="end" id="seRecentMeta"></span></h2>
+        <div class="scroll" style="max-height:250px"><table><thead><tr><th>时间</th><th>用户</th><th>来源</th>
+          </tr></thead><tbody id="seRecent"></tbody></table></div>
+        <h2 style="margin-top:12px"><svg class="ico"><use href="#i-check-circle"/></svg>最近成功登录</h2>
+        <div class="scroll" style="max-height:180px"><table><thead><tr><th>时间</th><th>用户</th><th>来源</th>
+          </tr></thead><tbody id="seOkBody"></tbody></table></div>
+      </div>
+    </div>
+    <div class="grid g2">
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-shield"/></svg>SSH 配置</h2>
+        <div class="kv" id="seSshd"></div>
+      </div>
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-list"/></svg>防火墙规则 / fail2ban 状态</h2>
+        <pre id="seUfwRaw" style="max-height:300px"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 端口 · 进程 -->
+  <section id="tab-net" class="hidden">
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-plug"/></svg>监听端口
+        <span class="q">「对外」= 不是绑在回环上</span>
+        <span class="end" id="ptMeta"></span></h2>
+      <div class="scroll" style="max-height:330px"><table><thead><tr><th>协议</th><th>监听</th><th>端口</th>
+        <th>进程</th><th>PID</th><th>范围</th></tr></thead><tbody id="ptBody"></tbody></table></div>
+      <h2 style="margin-top:12px"><svg class="ico"><use href="#i-net"/></svg>已建立连接
+        <span class="end" id="ptConnMeta"></span></h2>
+      <div class="scroll" style="max-height:200px"><table><thead><tr><th>协议</th><th>本端</th><th>对端</th>
+        </tr></thead><tbody id="ptConn"></tbody></table></div>
+    </div>
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-cpu"/></svg>占用最高的进程
+        <span class="end" id="prMeta"></span></h2>
+      <div class="toolbar">
+        <select id="prBy" onchange="loadProcesses()">
+          <option value="cpu">按 CPU</option><option value="mem">按内存</option>
+        </select>
+        <button class="act ghost" onclick="loadProcesses()"><svg class="ico"><use href="#i-refresh"/></svg>刷新</button>
+      </div>
+      <div class="scroll"><table><thead><tr><th>PID</th><th>用户</th><th class="num">CPU%</th><th class="num">内存%</th>
+        <th class="num">RSS</th><th>运行</th><th>命令</th><th class="num">操作</th></tr></thead>
+        <tbody id="prBody"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="hidden">
+    <div class="panel glass">
+      <h2><svg class="ico"><use href="#i-file"/></svg>看日志
+        <span class="q">journald 或 /var/log 下的文件（只允许这两个来源）</span></h2>
+      <div class="toolbar">
+        <select id="lgKind" onchange="logKindChanged()">
+          <option value="journal">journald 全量</option>
+          <option value="file">文件</option>
+        </select>
+        <input id="lgPath" type="text" placeholder="/var/log/auth.log" class="hidden" style="width:280px">
+        <select id="lgUnit"><option value="">— 选单元 —</option></select>
+        <select id="lgLines"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select>
+        <button class="act" onclick="loadLogs2()"><svg class="ico"><use href="#i-search"/></svg>读取</button>
+        <span class="hint" id="lgMeta"></span>
+      </div>
+      <div class="logbox" id="lgBox" style="max-height:520px"></div>
+    </div>
+  </section>
+
+  <!-- 操作 · 审计 -->
+  <section id="tab-actions" class="hidden">
+    <div class="grid g2">
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-list"/></svg>白名单动作
+          <span class="q">面板能改系统的全部手段就这些，没有任意命令执行</span></h2>
+        <div class="hint" style="margin-bottom:10px">
+          参数以列表形式交给进程，不经过 shell；<span class="bad-v">危险</span>动作要二次确认，无论成败都写审计。
+        </div>
+        <div id="acList"></div>
+        <h2 style="margin-top:14px"><svg class="ico"><use href="#i-check-circle"/></svg>执行结果
+          <span class="end" id="acMeta"></span></h2>
+        <pre id="acOut" style="max-height:280px">还没有执行过动作。</pre>
+      </div>
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-shield"/></svg>审计记录
+          <span class="end" id="auMeta"></span></h2>
+        <div class="row" style="margin-bottom:10px">
+          <button class="act ghost" onclick="loadAudit()"><svg class="ico"><use href="#i-refresh"/></svg>刷新</button>
+        </div>
+        <div class="scroll" style="max-height:520px"><table><thead><tr><th>时间</th><th>来源</th><th>动作</th>
+          <th>目标</th><th>结果</th><th>说明</th></tr></thead><tbody id="auBody"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast glass" id="toast"><svg class="ico"><use href="#i-check-circle"/></svg><span id="toastMsg"></span></div>
+
+<script>
+const TOKEN_KEY = "steward_token", THEME_KEY = "steward_theme";
+let TOKEN = new URLSearchParams(location.search).get("token") || localStorage.getItem(TOKEN_KEY) || "";
+let META = {}, ACTIONS = [], UNITS = [], curTab = "overview", pollTimer = null;
+
+/* --- 工具 ------------------------------------------------------------- */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = n => (n ?? 0).toLocaleString("zh-CN");
+function bytes(n){
+  if(n == null) return "–";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0; n = Number(n);
+  while(n >= 1024 && i < u.length-1){ n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + u[i];
+}
+const rate = n => bytes(n) + "/s";
+function dur(sec){
+  sec = Number(sec || 0);
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60);
+  if(d) return d + " 天 " + h + " 小时";
+  if(h) return h + " 小时 " + m + " 分";
+  return m + " 分";
+}
+function toast(msg, isErr){
+  const el = document.getElementById("toast");
+  document.getElementById("toastMsg").innerHTML = msg;
+  el.querySelector("use").setAttribute("href", isErr ? "#i-x-circle" : "#i-check-circle");
+  el.className = "toast glass show" + (isErr ? " err" : "");
+  clearTimeout(el._h);
+  el._h = setTimeout(() => el.className = "toast glass", 4200);
+}
+async function api(path, opts = {}){
+  const r = await fetch(path, {...opts, headers: {
+    "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json", ...(opts.headers || {})}});
+  if(r.status === 401){ showLogin(); throw new Error("unauthorized"); }
+  return r.json();
+}
+function setBar(id, pct){
+  const el = document.getElementById(id);
+  el.querySelector("i").style.width = Math.min(100, Math.max(0, pct || 0)) + "%";
+  el.className = "bar" + (pct >= 90 ? " bad" : pct >= 75 ? " warn" : "");
+}
+
+/* --- 登录 / 主题 ------------------------------------------------------ */
+function showLogin(){ document.getElementById("login").classList.remove("hidden"); }
+function logout(){ localStorage.removeItem(TOKEN_KEY); TOKEN = ""; showLogin(); }
+async function doLogin(){
+  const t = document.getElementById("loginToken").value.trim();
+  const r = await fetch("/api/login", {method:"POST", headers:{"Content-Type":"application/json"},
+                                       body: JSON.stringify({token:t})});
+  const j = await r.json();
+  if(j.ok){
+    TOKEN = j.token; localStorage.setItem(TOKEN_KEY, TOKEN);
+    document.getElementById("login").classList.add("hidden"); boot();
+  } else document.getElementById("loginErr").textContent = j.error || "登录失败";
+}
+function applyTheme(t){
+  document.documentElement.dataset.theme = t;
+  document.getElementById("themeBtn").innerHTML = t === "dark"
+    ? '<svg class="ico"><use href="#i-sun"/></svg>浅色'
+    : '<svg class="ico"><use href="#i-moon"/></svg>深色';
+}
+function toggleTheme(){
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, t); applyTheme(t);
+}
+
+/* --- 概览 ------------------------------------------------------------- */
+async function loadOverview(){
+  try{
+    const j = await api("/api/overview");
+    const cpu = j.cpu || {}, mem = j.mem || {}, net = j.net || {};
+    document.getElementById("ovCpu").textContent = (cpu.percent ?? 0).toFixed(1) + "%";
+    document.getElementById("ovCpuSub").textContent =
+      (cpu.count || 1) + " 核" + ((cpu.cores || []).length ? " · 各核 " + cpu.cores.map(c => c.toFixed(0) + "%").join(" ") : "");
+    setBar("ovCpuBar", cpu.percent || 0);
+    document.getElementById("ovMem").textContent = (mem.percent ?? 0).toFixed(1) + "%";
+    document.getElementById("ovMemSub").textContent = bytes(mem.used) + " / " + bytes(mem.total) +
+      (mem.swap_total ? " · swap " + bytes(mem.swap_used) : " · 无 swap");
+    setBar("ovMemBar", mem.percent || 0);
+    const root = (j.disk || [])[0] || {};
+    document.getElementById("ovDisk").textContent = (root.percent ?? 0).toFixed(1) + "%";
+    document.getElementById("ovDiskSub").textContent = bytes(root.free) + " 可用 · " + (root.mount || "–");
+    setBar("ovDiskBar", root.percent || 0);
+    document.getElementById("ovNet").textContent = "↓ " + rate(net.rx_bps || 0);
+    document.getElementById("ovNetSub").textContent = "↑ " + rate(net.tx_bps || 0) +
+      " · 累计 " + bytes(net.rx_total || 0);
+    document.getElementById("ovLoad").textContent = (cpu.load || []).map(x => Number(x).toFixed(2)).join("  ");
+    document.getElementById("ovCore").textContent = "1 / 5 / 15 分钟负载";
+    document.getElementById("ovProcs").textContent = num((j.procs || {}).total);
+    document.getElementById("ovZombie").textContent = "僵尸 " + num((j.procs || {}).zombie) +
+      " · 运行中 " + num((j.procs || {}).running);
+    const sv = j.services || {}, dk = j.docker || {}, se = j.security || {};
+    document.getElementById("ovSvc").textContent = sv.available ? (sv.running + " / " + sv.total) : "不可用";
+    document.getElementById("ovSvcSub").textContent = sv.available
+      ? ((sv.failed ? sv.failed + " 个失败" : "没有失败单元") + " · 容器 " + (dk.running || 0) + "/" + (dk.total || 0))
+      : "这台机器上没有 systemd";
+    document.getElementById("ovSec").textContent = num(se.failed);
+    document.getElementById("ovSecSub").textContent = se.top ? "最多来自 " + esc(se.top) : "暂无记录";
+    document.getElementById("hHost").innerHTML = '<svg class="ico"><use href="#i-server"/></svg>' +
+      esc((j.info || {}).hostname || "–");
+    document.getElementById("hUp").innerHTML = '<svg class="ico"><use href="#i-clock"/></svg>已运行 ' + dur(j.uptime);
+    document.getElementById("hPill").innerHTML = '<svg class="ico"><use href="#i-pulse"/></svg>负载 ' +
+      (cpu.load ? Number(cpu.load[0]).toFixed(2) : "–");
+    document.getElementById("hPill").className = "pill" + ((cpu.load && cpu.load[0] > (cpu.count || 1) * 1.5) ? " bad" : " ok");
+    document.getElementById("ovInt").textContent = META.interval || 2;
+    document.getElementById("ovInfo").innerHTML = [
+      ["主机名", (j.info || {}).hostname], ["系统", (j.info || {}).os], ["内核", (j.info || {}).kernel],
+      ["架构", (j.info || {}).arch], ["运行时长", j.uptime_text], ["Python", (j.info || {}).python],
+      ["采样时间", j.ts],
+    ].map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v || "–")}</div>`).join("");
+    document.getElementById("ovDiskList").innerHTML = (j.disk || []).map(d =>
+      `<tr><td class="mono">${esc(d.mount)}</td><td class="mono hint">${esc(d.device)}</td>
+        <td class="num">${bytes(d.used)} / ${bytes(d.total)}</td>
+        <td class="num ${d.percent >= 90 ? "bad-v" : d.percent >= 75 ? "warn-v" : ""}">${d.percent.toFixed(0)}%</td>
+        <td class="num hint">${d.inodes_percent.toFixed(0)}%</td></tr>`).join("") ||
+      '<tr><td colspan="5" class="empty">没有可显示的文件系统</td></tr>';
+    drawSpark(j.series || []);
+  }catch(e){ if(e.message !== "unauthorized") console.warn(e); }
+}
+function drawSpark(series){
+  const n = series.length;
+  if(n < 2){ document.getElementById("spCpu").setAttribute("points", "");
+             document.getElementById("spNet").setAttribute("points", ""); return; }
+  const x = i => (i / (n - 1) * 600).toFixed(1);
+  const cpu = series.map((s, i) => `${x(i)},${(44 - Math.min(100, s.cpu || 0) / 100 * 40).toFixed(1)}`).join(" ");
+  const maxNet = Math.max(1, ...series.map(s => (s.rx || 0) + (s.tx || 0)));
+  const net = series.map((s, i) => `${x(i)},${(44 - ((s.rx || 0) + (s.tx || 0)) / maxNet * 36).toFixed(1)}`).join(" ");
+  document.getElementById("spCpu").setAttribute("points", cpu);
+  document.getElementById("spNet").setAttribute("points", net);
+  const last = series[series.length - 1] || {};
+  document.getElementById("ovSparkLegend").textContent =
+    "当前 CPU " + (last.cpu ?? 0).toFixed(1) + "% · 网络 " + rate((last.rx || 0) + (last.tx || 0)) +
+    " · 峰值 " + rate(maxNet);
+}
+
+/* --- 服务 ------------------------------------------------------------- */
+async function loadServices(){
+  const j = await api("/api/services");
+  UNITS = j.units || [];
+  document.getElementById("svcMeta").textContent = j.available
+    ? (j.units.length + " 个单元 · 运行中 " + j.running + (j.failed ? " · 失败 " + j.failed : ""))
+    : (j.hint || "不可用");
+  filterUnits();
+  const sel = document.getElementById("lgUnit");
+  sel.innerHTML = '<option value="">— 选单元 —</option>' +
+    UNITS.filter(u => u.unit.endsWith(".service")).map(u =>
+      `<option value="${esc(u.unit)}">${esc(u.unit)}</option>`).join("");
+}
+function filterUnits(){
+  const q = document.getElementById("svcQ").value.trim().toLowerCase();
+  const only = document.getElementById("svcOnly").value;
+  const rows = UNITS.filter(u =>
+    (!q || u.unit.toLowerCase().includes(q) || (u.desc || "").toLowerCase().includes(q)) &&
+    (!only || u.active === only));
+  document.getElementById("svcBody").innerHTML = rows.map(u => {
+    const cls = u.active === "active" ? "ok" : u.active === "failed" ? "bad" : "mute";
+    return `<tr onclick="openUnit('${esc(u.unit)}')" style="cursor:pointer">
+      <td class="mono">${esc(u.unit)}</td>
+      <td><span class="tag ${cls}">${esc(u.active)}</span></td>
+      <td class="hint">${esc(u.sub)}</td>
+      <td class="hint" style="white-space:normal">${esc(u.desc)}</td>
+      <td class="num" onclick="event.stopPropagation()">
+        <button class="act ghost mini" onclick="runAction('service.restart',{unit:'${esc(u.unit)}'})">重启</button>
+        <button class="act danger mini" onclick="runAction('service.stop',{unit:'${esc(u.unit)}'})">停止</button>
+        <button class="act ghost mini" onclick="runAction('service.start',{unit:'${esc(u.unit)}'})">启动</button>
+      </td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="empty">没有匹配的单元</td></tr>';
+}
+async function openUnit(unit){
+  const j = await api("/api/service?unit=" + encodeURIComponent(unit));
+  const box = document.getElementById("svcPanel");
+  box.classList.remove("hidden");
+  document.getElementById("svcTitle").textContent = unit;
+  if(!j.ok){ document.getElementById("svcDesc").textContent = j.error || "";
+             document.getElementById("svcKv").innerHTML = ""; }
+  else{
+    document.getElementById("svcDesc").textContent = j.desc || "";
+    document.getElementById("svcKv").innerHTML = [
+      ["状态", j.active + " / " + j.sub], ["开机自启", j.enabled || "–"], ["主进程 PID", j.pid || "–"],
+      ["启动于", j.since || "–"], ["重启次数", j.restarts || "0"],
+      ["内存", j.memory != null ? bytes(j.memory) : "–"], ["CPU 时间", j.cpu_sec != null ? j.cpu_sec + " s" : "–"],
+      ["单元文件", j.fragment || "–"],
+    ].map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v mono">${esc(v)}</div>`).join("");
+  }
+  document.getElementById("svcActions").innerHTML =
+    `<button class="act" onclick="runAction('service.restart',{unit:'${esc(unit)}'})">
+       <svg class="ico"><use href="#i-restart"/></svg>重启</button>
+     <button class="act ghost" onclick="runAction('service.start',{unit:'${esc(unit)}'})">
+       <svg class="ico"><use href="#i-play"/></svg>启动</button>
+     <button class="act danger" onclick="runAction('service.stop',{unit:'${esc(unit)}'})">
+       <svg class="ico"><use href="#i-stop"/></svg>停止</button>
+     <span class="hint">单元文件：${esc((j && j.fragment) || "–")}</span>`;
+  const lg = await api("/api/service/logs?unit=" + encodeURIComponent(unit) + "&lines=200");
+  document.getElementById("svcLogs").innerHTML = (lg.lines || []).map(l =>
+    `<div class="logline"><span>${esc(l)}</span></div>`).join("") || '<div class="empty">没有日志</div>';
+  box.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+/* --- Docker ----------------------------------------------------------- */
+async function loadDocker(){
+  const j = await api("/api/docker");
+  document.getElementById("dkMeta").textContent = j.available
+    ? (j.containers.length + " 个容器 · 运行中 " + j.running) : (j.hint || "不可用");
+  document.getElementById("dkBody").innerHTML = (j.containers || []).map(c => {
+    const st = c.stats || {};
+    return `<tr>
+      <td class="mono">${esc(c.name)}</td>
+      <td><span class="tag ${c.running ? "ok" : "mute"}">${esc(c.status || c.state)}</span></td>
+      <td class="hint">${esc(c.image)}</td>
+      <td class="num">${esc(st.cpu || "–")}</td>
+      <td class="num">${esc(st.mem || "–")}</td>
+      <td class="num hint">${esc(st.net || "–")}</td>
+      <td class="num">
+        <button class="act ghost mini" onclick="openContainer('${esc(c.name)}')">日志</button>
+        ${c.running
+          ? `<button class="act ghost mini" onclick="runAction('docker.restart',{name:'${esc(c.name)}'})">重启</button>
+             <button class="act danger mini" onclick="runAction('docker.stop',{name:'${esc(c.name)}'})">停止</button>`
+          : `<button class="act mini" onclick="runAction('docker.start',{name:'${esc(c.name)}'})">启动</button>`}
+      </td></tr>`;
+  }).join("") || '<tr><td colspan="7" class="empty">没有容器（或没有 docker）</td></tr>';
+}
+async function openContainer(name){
+  const j = await api("/api/docker/logs?name=" + encodeURIComponent(name) + "&lines=200");
+  document.getElementById("dkPanel").classList.remove("hidden");
+  document.getElementById("dkTitle").textContent = name;
+  document.getElementById("dkLogs").innerHTML = (j.lines || []).map(l =>
+    `<div class="logline"><span>${esc(l)}</span></div>`).join("") || '<div class="empty">没有日志</div>';
+}
+async function loadImages(){
+  const j = await api("/api/docker/images");
+  document.getElementById("dkImagesWrap").classList.remove("hidden");
+  document.getElementById("dkImages").innerHTML = (j.images || []).map(i =>
+    `<tr><td class="mono">${esc(i.repo)}</td><td class="mono">${esc(i.tag)}</td>
+      <td class="mono hint">${esc(i.id)}</td><td class="num">${esc(i.size)}</td>
+      <td class="hint">${esc(i.created)}</td></tr>`).join("") ||
+    '<tr><td colspan="5" class="empty">没有镜像</td></tr>';
+}
+
+/* --- 安全 ------------------------------------------------------------- */
+async function loadSecurity(){
+  const j = await api("/api/security");
+  const lg = j.logins || {}, fw = j.firewall || {}, f2b = j.fail2ban || {}, ssh = j.sshd || {};
+  document.getElementById("seFailed").textContent = num(lg.failed);
+  document.getElementById("seOk").textContent = num(lg.accepted);
+  document.getElementById("seUfwV").textContent = fw.available ? (fw.active ? "已启用" : "未启用") : "没装";
+  document.getElementById("seUfwV").className = "v " + (fw.active ? "ok-v" : "warn-v");
+  document.getElementById("seUfwN").textContent = fw.available ? ((fw.rules || []).length + " 条规则") : (fw.hint || "");
+  document.getElementById("seF2bV").textContent = f2b.available ? ((f2b.jails || []).length + " 个 jail") : "没装";
+  document.getElementById("seF2bV").className = "v " + (f2b.available && (f2b.jails || []).length ? "ok-v" : "warn-v");
+  document.getElementById("seF2bN").textContent = f2b.available ? (f2b.jails || []).join("、") : (f2b.hint || "");
+  document.getElementById("seIPs").innerHTML = (lg.top_ips || []).map(x =>
+    `<tr><td class="mono">${esc(x.ip)}</td><td class="num">${num(x.n)}</td>
+      <td class="num"><button class="act danger mini" onclick="runAction('ufw.deny',{ip:'${esc(x.ip)}'})">封禁</button></td>
+      </tr>`).join("") || '<tr><td colspan="3" class="empty">没有失败记录</td></tr>';
+  document.getElementById("seUsers").innerHTML = (lg.top_users || []).map(x =>
+    `<tr><td class="mono">${esc(x.user)}</td><td class="num">${num(x.n)}</td></tr>`).join("") ||
+    '<tr><td colspan="2" class="empty">–</td></tr>';
+  document.getElementById("seRecent").innerHTML = (lg.recent || []).map(x =>
+    `<tr><td class="mono hint">${esc(x.ts)}</td><td class="mono">${esc(x.user)}</td>
+      <td class="mono">${esc(x.ip)}</td></tr>`).join("") ||
+    '<tr><td colspan="3" class="empty">没有失败记录</td></tr>';
+  document.getElementById("seRecentMeta").textContent = "共 " + num(lg.failed) + " 条，显示最近 " +
+    (lg.recent || []).length + " 条";
+  document.getElementById("seOkBody").innerHTML = (lg.recent_ok || []).map(x =>
+    `<tr><td class="mono hint">${esc(x.ts)}</td><td class="mono">${esc(x.user)}</td>
+      <td class="mono">${esc(x.ip)}</td></tr>`).join("") || '<tr><td colspan="3" class="empty">–</td></tr>';
+  const cfg = ssh.config || {};
+  document.getElementById("seSshd").innerHTML =
+    Object.keys(cfg).map(k => `<div class="k">${esc(k)}</div><div class="v mono">${esc(cfg[k])}</div>`).join("") +
+    `<div class="k">公钥数</div><div class="v mono">${num(ssh.authorized_keys)}</div>` +
+    (ssh.note ? `<div class="k"></div><div class="v warn-v">${esc(ssh.note)}</div>` : "");
+  const rules = (fw.rules || []).join("\n");
+  const f2bText = Object.keys(f2b.detail || {}).map(k => "== " + k + " ==\n" + f2b.detail[k]).join("\n\n");
+  document.getElementById("seUfwRaw").textContent = (rules ? "【ufw】\n" + rules + "\n\n" : "") +
+    (f2bText || (fw.raw || "（没有可显示的规则）"));
+}
+
+/* --- 端口 / 进程 ------------------------------------------------------ */
+async function loadNet(){
+  const j = await api("/api/ports");
+  const L = j.listening || {}, C = j.established || {};
+  document.getElementById("ptMeta").textContent = L.available
+    ? (L.ports.length + " 个监听 · 对外 " + L.exposed) : (L.hint || "");
+  document.getElementById("ptBody").innerHTML = (L.ports || []).map(p =>
+    `<tr><td class="mono">${esc(p.proto)}</td><td class="mono">${esc(p.local)}</td>
+      <td class="num mono">${esc(p.port)}</td><td>${esc(p.process || "–")}</td>
+      <td class="mono hint">${esc(p.pid || "–")}</td>
+      <td>${p.exposed ? '<span class="tag warn">对外</span>' : '<span class="tag mute">本机</span>'}</td></tr>`
+    ).join("") || '<tr><td colspan="6" class="empty">没有监听端口（或没有 ss）</td></tr>';
+  document.getElementById("ptConn").innerHTML = (C.connections || []).map(c =>
+    `<tr><td class="mono">${esc(c.proto)}</td><td class="mono">${esc(c.local)}</td>
+      <td class="mono">${esc(c.peer)}</td></tr>`).join("") ||
+    '<tr><td colspan="3" class="empty">没有已建立的连接</td></tr>';
+  document.getElementById("ptConnMeta").textContent = (C.connections || []).length + " 条（最多 40 条）";
+}
+async function loadProcesses(){
+  const by = document.getElementById("prBy").value;
+  const j = await api("/api/processes?by=" + by);
+  const c = j.counts || {};
+  document.getElementById("prMeta").textContent = "共 " + num(c.total) + " 个进程 · 僵尸 " + num(c.zombie);
+  document.getElementById("prBody").innerHTML = ((j.top || {}).top || []).map(p =>
+    `<tr><td class="mono">${esc(p.pid)}</td><td>${esc(p.user)}</td>
+      <td class="num">${p.cpu.toFixed(1)}</td><td class="num">${p.mem.toFixed(1)}</td>
+      <td class="num">${bytes(p.rss)}</td><td class="hint">${dur(p.etimes)}</td>
+      <td class="mono wrap" style="max-width:420px">${esc(p.args)}</td>
+      <td class="num">
+        <button class="act danger mini" onclick="runAction('process.term',{pid:'${esc(p.pid)}'})">TERM</button>
+        <button class="act danger mini" onclick="runAction('process.kill',{pid:'${esc(p.pid)}'})">KILL</button>
+      </td></tr>`).join("") || '<tr><td colspan="8" class="empty">没有数据</td></tr>';
+}
+
+/* --- 日志 ------------------------------------------------------------- */
+function logKindChanged(){
+  const file = document.getElementById("lgKind").value === "file";
+  document.getElementById("lgPath").classList.toggle("hidden", !file);
+  document.getElementById("lgUnit").classList.toggle("hidden", file);
+}
+async function loadLogs2(){
+  const kind = document.getElementById("lgKind").value;
+  const lines = document.getElementById("lgLines").value;
+  let url, meta;
+  if(kind === "file"){
+    const p = document.getElementById("lgPath").value.trim();
+    if(!p) return toast("请填写日志文件路径（必须在 /var/log 下）", true);
+    url = "/api/log?lines=" + lines + "&path=" + encodeURIComponent(p);
+    meta = p;
+  } else {
+    const unit = document.getElementById("lgUnit").value;
+    url = unit ? ("/api/service/logs?lines=" + lines + "&unit=" + encodeURIComponent(unit))
+               : ("/api/journal?lines=" + lines);
+    meta = unit || "journald 全量";
+  }
+  const j = await api(url);
+  document.getElementById("lgMeta").textContent = meta + " · " + (j.lines || []).length + " 行";
+  document.getElementById("lgBox").innerHTML = (j.lines || []).map(l =>
+    `<div class="logline ${/error|fail|denied|refused/i.test(l) ? "warn" : ""}"><span>${esc(l)}</span></div>`
+    ).join("") || `<div class="empty">${esc(j.error || "没有内容")}</div>`;
+}
+
+/* --- 动作与审计 ------------------------------------------------------- */
+async function loadActions(){
+  const j = await api("/api/meta");
+  ACTIONS = j.actions || [];
+  document.getElementById("acList").innerHTML = ACTIONS.map(a => `
+    <div class="fgroup" style="border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:8px">
+      <div class="row">
+        <b>${esc(a.label)}</b>
+        ${a.danger ? '<span class="tag bad">危险</span>' : '<span class="tag mute">安全</span>'}
+        <span class="hint mono">${esc(a.name)} · ${esc(a.desc)}</span>
+      </div>
+      <div class="row" style="margin-top:7px">
+        ${(a.params || []).map(p => `<input type="text" id="p_${esc(a.name)}_${esc(p)}"
+            placeholder="${esc(p)}" style="min-width:150px">`).join("")}
+        <button class="act ${a.danger ? "danger" : ""} mini" onclick="runAction('${esc(a.name)}')">
+          <svg class="ico"><use href="#i-play"/></svg>执行</button>
+      </div>
+    </div>`).join("");
+}
+function collectParams(name){
+  const a = ACTIONS.find(x => x.name === name) || {};
+  const out = {};
+  for(const p of (a.params || [])){
+    const el = document.getElementById("p_" + name + "_" + p);
+    out[p] = el ? el.value.trim() : "";
+  }
+  return out;
+}
+async function runAction(name, params){
+  const a = ACTIONS.find(x => x.name === name);
+  if(!a){ toast("未知动作：" + esc(name), true); return; }
+  const p = params || collectParams(name);
+  const label = a.label + "　" + a.name + (Object.keys(p).length ? "\n参数：" + JSON.stringify(p) : "");
+  if(a.danger && !confirm("确认执行这个动作？\n\n" + label + "\n\n它会改变系统状态，无论成败都会记入审计。")) return;
+  toast("执行中：" + esc(a.label));
+  try{
+    const j = await api("/api/action", {method:"POST", body: JSON.stringify({name, params: p})});
+    const head = (j.ok ? "✔ 成功" : "✘ 失败") + "　" + a.label + "　(" + (j.argv || []).join(" ") + ")" +
+                 (j.demo ? "　[演示模式]" : "") + (j.audit ? "　审计已记录" : "");
+    document.getElementById("acOut").textContent =
+      head + "\n" + "─".repeat(60) + "\n" + ((j.out || "") + (j.err ? "\n[stderr]\n" + j.err : "") ||
+      (j.error || j.detail || "(没有输出)"));
+    document.getElementById("acMeta").textContent = nowText();
+    toast(j.ok ? esc(a.label) + " 成功" : esc(a.label) + " 失败：" + esc(j.error || j.detail || ""), !j.ok);
+    loadAudit();
+    if(name.startsWith("service.") || name === "systemd.reload") loadServices();
+    if(name.startsWith("docker.")) loadDocker();
+    if(name.startsWith("process.")) loadProcesses();
+    if(name === "ufw.deny") loadSecurity();
+  }catch(e){ toast("执行失败：" + esc(e.message), true); }
+}
+function nowText(){
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+async function loadAudit(){
+  const j = await api("/api/audit?lines=200");
+  const e = j.entries || [];
+  document.getElementById("auMeta").textContent = e.length ? ("最近 " + e.length + " 条") : "还没有记录";
+  document.getElementById("auBody").innerHTML = e.map(x =>
+    `<tr><td class="mono hint">${esc(x.ts)}</td><td class="mono">${esc(x.ip)}</td>
+      <td class="mono">${esc(x.action)}</td><td class="mono wrap">${esc(x.target)}</td>
+      <td>${x.ok ? '<span class="tag ok">成功</span>' : '<span class="tag bad">失败</span>'}</td>
+      <td class="hint wrap" title="${esc(x.detail)}">${esc((x.detail || "").slice(0, 60))}</td></tr>`
+    ).join("") || '<tr><td colspan="6" class="empty">还没有审计记录</td></tr>';
+}
+
+/* --- 标签页与轮询 ----------------------------------------------------- */
+const LOADERS = {overview:loadOverview, services:loadServices, docker:loadDocker,
+                 security:loadSecurity, net:loadNet, actions:() => {loadAudit();}};
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
+  for(const id of ["overview","services","docker","security","net","logs","actions"])
+    document.getElementById("tab-" + id).classList.toggle("hidden", id !== b.dataset.tab);
+  curTab = b.dataset.tab;
+  const fn = LOADERS[curTab];
+  if(fn) try{ fn(); }catch(e){ toast("加载失败：" + esc(e.message), true); }
+});
+function refreshNow(btn){
+  if(btn) btn.classList.add("flash");
+  setTimeout(() => btn && btn.classList.remove("flash"), 800);
+  const fn = LOADERS[curTab];
+  if(fn) fn(); else loadLogs2();
+}
+
+/* --- 入口 ------------------------------------------------------------- */
+applyTheme(localStorage.getItem(THEME_KEY) || "light");
+async function boot(){
+  try{
+    META = await api("/api/meta");
+    document.getElementById("modeLine").textContent =
+      " v" + META.version + (META.real ? " · 真机" : " · 演示") + " · 启动于 " + META.started;
+    await Promise.all([loadOverview(), loadServices(), loadActions(), loadAudit()]);
+    if(pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(loadOverview, 5000);
+  }catch(e){ if(e.message !== "unauthorized") toast("加载失败：" + esc(e.message), true); }
+}
+if(TOKEN) boot(); else showLogin();
+
+</script>
+</body>
+</html>

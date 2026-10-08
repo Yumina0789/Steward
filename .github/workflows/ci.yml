@@ -1,0 +1,39 @@
+name: ci
+
+# Steward 的 CI：结构自检 + 演示模式冒烟 + 安装脚本 shellcheck。
+# 三个 Python 版本都跑，是因为真机上的 3.8（Ubuntu 20.04 自带）也要能用。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 结构自检（语法 / id / 图标 / 安全底线）
+        run: python3 tools/check.py
+
+      - name: 演示模式冒烟（拉起来把接口打一遍）
+        run: python3 tools/smoke.py
+
+  shellcheck:
+    name: shellcheck 安装脚本
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 装 shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: 检查 install.sh
+        run: shellcheck -S warning install.sh
