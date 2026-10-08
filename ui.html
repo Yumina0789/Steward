@@ -345,6 +345,11 @@
         <h2><svg class="ico"><use href="#i-list"/></svg>防火墙规则 / fail2ban 状态</h2>
         <pre id="seUfwRaw" style="max-height:300px"></pre>
       </div>
+      <div class="panel glass" style="margin:0">
+        <h2><svg class="ico"><use href="#i-shield"/></svg>自动限流
+          <span class="q">从面板拉「该封谁」，用白名单动作执行</span></h2>
+        <div class="kv" id="seEnf"></div>
+      </div>
     </div>
   </section>
 
@@ -700,6 +705,20 @@ async function loadSecurity(){
   const f2bText = Object.keys(f2b.detail || {}).map(k => "== " + k + " ==\n" + f2b.detail[k]).join("\n\n");
   document.getElementById("seUfwRaw").textContent = (rules ? "【ufw】\n" + rules + "\n\n" : "") +
     (f2bText || (fw.raw || "（没有可显示的规则）"));
+  try{
+    const ef = await api("/api/enforce");
+    const last = ef.last || {};
+    document.getElementById("seEnf").innerHTML = [
+      ["状态", ef.enabled ? "已开启" : "关闭"],
+      ["拉取来源", ef.url || "（没配 --enforce-url）"],
+      ["间隔", ef.interval ? ef.interval + " 秒" : "–"],
+      ["最近一轮", last.ts ? new Date(last.ts * 1000).toLocaleString("zh-CN") : "还没跑过"],
+      ["本轮封禁", (last.banned || []).join("、") || "无"],
+      ["本轮解封", (last.unbanned || []).join("、") || "无"],
+      ["结果", last.ok === false ? "有失败：" + (last.error || "") : (last.ts ? "正常" : "–")],
+    ].map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v mono">${esc(v)}</div>`).join("") +
+      (ef.note ? `<div class="k"></div><div class="v warn-v">${esc(ef.note)}</div>` : "");
+  }catch(e){ /* 老版本后端没有这个接口，忽略 */ }
 }
 
 /* --- 端口 / 进程 ------------------------------------------------------ */

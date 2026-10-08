@@ -16,6 +16,8 @@ UNIT="/etc/systemd/system/steward.service"
 PORT="8402"
 BIND="127.0.0.1"
 TOKEN=""
+ENFORCE_URL="${STEWARD_ENFORCE_URL:-}"
+ENFORCE_TOKEN="${STEWARD_ENFORCE_TOKEN:-}"
 REPO_RAW="${STEWARD_REPO_RAW:-https://raw.githubusercontent.com/Yumina0789/Steward/main}"
 UNINSTALL=0
 PURGE=0
@@ -33,6 +35,8 @@ Steward 安装脚本：把面板装成宿主机上的 systemd 服务。
   --prefix DIR    安装目录（默认 /opt/steward）
   --data-dir DIR  数据目录（默认 /var/lib/steward，放 token 与审计日志）
   --token STR     指定 token（默认随机生成）
+  --enforce-url U 从哪个面板拉「该封谁」，例如 http://127.0.0.1:8099（Nimbus）
+  --enforce-token T  上面那个面板的访问 token（给了才会开启自动封禁）
   --uninstall     停止并移除服务，保留数据与 token
   --purge         连数据目录一起删
   -h, --help      看这段
@@ -46,6 +50,8 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="${2:?}"; shift 2 ;;
     --data-dir) DATA_DIR="${2:?}"; shift 2 ;;
     --token) TOKEN="${2:?}"; shift 2 ;;
+    --enforce-url) ENFORCE_URL="${2:?}"; shift 2 ;;
+    --enforce-token) ENFORCE_TOKEN="${2:?}"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --purge) UNINSTALL=1; PURGE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -112,6 +118,13 @@ chmod 600 "$DATA_DIR/steward.token"
 TOKEN="$(cat "$DATA_DIR/steward.token")"
 
 echo "==> 写 systemd 单元"
+ENFORCE_ARGS=""
+if [ -n "$ENFORCE_URL" ] && [ -n "$ENFORCE_TOKEN" ]; then
+  ENFORCE_ARGS=" --enforce-url $ENFORCE_URL --enforce-token $ENFORCE_TOKEN"
+  echo "    自动封禁已配置：从 $ENFORCE_URL 拉取待执行列表"
+else
+  echo "    没给 --enforce-url/--enforce-token，自动封禁关闭（面板上仍可手动封禁）"
+fi
 cat > "$UNIT" <<EOF
 [Unit]
 Description=Steward 服务器管理面板
@@ -121,14 +134,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$PY $PREFIX/steward.py --mode real --bind $BIND --port $PORT --data-dir $DATA_DIR --token-file $DATA_DIR/steward.token
+ExecStart=$PY $PREFIX/steward.py --mode real --bind $BIND --port $PORT --data-dir $DATA_DIR --token-file $DATA_DIR/steward.token$ENFORCE_ARGS
 Restart=always
 RestartSec=3
 User=root
-# 面板本身就是半个 root 工具（要 systemctl / docker / 杀进程），下面这些只是顺手挡误伤：
-# /usr 与 /boot 只读、禁提权、私有 /tmp。/etc 仍可写 —— ufw 要写 /etc/ufw，
-# apt 要写 /var/lib/apt，这些都得留着。
+# 面板本身就是半个 root 工具（要 systemctl / docker / 杀进程），下面这些只是顺手挡误伤。
+# 注意 ProtectSystem 的档位：yes = /usr /boot 只读；**full = 连 /etc 也只读**；
+# strict = 只剩 /dev /proc /sys 可写。所以要用 full 就必须把 ufw 需要的目录放行，
+# 否则 ufw deny 会以「'/etc/ufw/user.rules' is not writable」失败（踩过）。
 ProtectSystem=full
+ReadWritePaths=/etc/ufw
 ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
@@ -140,7 +155,10 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now steward
+systemctl enable steward
+# 一定要 restart 而不是 `enable --now`：对已经在跑的服务，`--now` 不会重启它，
+# 于是升级完还在跑旧代码（这个坑我自己踩过一次：新接口一直 404）。
+systemctl restart steward
 sleep 1
 if ! systemctl is-active --quiet steward; then
   echo "!! 服务没起来，看日志：journalctl -u steward -n 50 --no-pager" >&2

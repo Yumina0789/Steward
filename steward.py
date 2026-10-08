@@ -39,6 +39,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -716,6 +718,10 @@ ACTIONS = {
     "ufw.deny": {"label": "防火墙封禁来源 IP", "desc": "ufw deny from <ip>",
                  "params": {"ip": _val_ip}, "danger": True,
                  "argv": lambda p: ["ufw", "deny", "from", p["ip"]], "timeout": 30},
+    "ufw.undeny": {"label": "解封来源 IP", "desc": "ufw delete deny from <ip>",
+                   "params": {"ip": _val_ip}, "danger": False,
+                   "argv": lambda p: ["ufw", "--force", "delete", "deny", "from", p["ip"]],
+                   "timeout": 30},
     "fail2ban.unban": {"label": "fail2ban 解封 IP", "desc": "fail2ban-client set <jail> unbanip <ip>",
                        "params": {"jail": _val_name, "ip": _val_ip}, "danger": False,
                        "argv": lambda p: ["fail2ban-client", "set", p["jail"], "unbanip", p["ip"]]},
@@ -761,8 +767,97 @@ class Audit:
         return out
 
 
-def list_actions():
-    return [{"name": k, "label": v["label"], "desc": v["desc"], "danger": v["danger"],
+class Enforcer:
+    """从 Nimbus 面板拉「该封谁 / 该解封谁」，用本机的白名单动作执行，再把结果回报。
+
+    为什么是它拉、而不是 Nimbus 推：防火墙的权柄本来就该留在宿主机上；而且 Nimbus
+    的面板已经发布在宿主的 127.0.0.1:8099，宿主直接就能连 —— 不用开新端口，也不用
+    给容器任何特权。执行仍然走 ACTIONS 那张表（ufw.deny / ufw.undeny），所以自动封禁
+    和手动封禁一样有审计。
+    """
+
+    def __init__(self, url, token, interval, audit, timeout=15):
+        self.url = (url or "").rstrip("/")
+        self.token = token or ""
+        self.interval = max(10, int(interval or 60))
+        self.audit = audit
+        self.timeout = timeout
+        self.enabled = bool(self.url and self.token)
+        self.last = {"ts": 0, "ok": None, "banned": [], "unbanned": [], "error": ""}
+        self.lock = threading.Lock()
+
+    # --- 与 Nimbus 的两次对话 ---------------------------------------------
+    def _call(self, path, method="GET", body=None):
+        if not self.enabled:
+            return False, {"error": "没配 --enforce-url / --enforce-token"}
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.url + path, data=data, method=method, headers={
+            "Authorization": "Bearer " + self.token, "Content-Type": "application/json",
+            "User-Agent": "steward-enforcer"})
+        try:
+            # 这是本机回环调用，必须绕开环境里的 HTTP(S)_PROXY
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as r:
+                raw = r.read().decode("utf-8", "replace")
+            return True, (json.loads(raw) if raw.strip() else {})
+        except urllib.error.HTTPError as e:
+            return False, {"error": "HTTP %d：%s" % (e.code, e.read().decode("utf-8", "replace")[:200])}
+        except Exception as e:  # noqa: BLE001
+            return False, {"error": "%s: %s" % (type(e).__name__, e)}
+
+    def poll_once(self):
+        """跑一轮：拉取 → 执行 → 回报。返回这一轮的结果（也给界面看）。"""
+        result = {"ts": int(time.time()), "ok": True, "banned": [], "unbanned": [], "error": ""}
+        ok, data = self._call("/api/enforce/pending")
+        if not ok:
+            result.update(ok=False, error=data.get("error", "拉不到待执行列表"))
+            self._remember(result)
+            return result
+        for item in (data.get("ban") or []):
+            ip, reason, detail = item.get("ip"), item.get("reason", ""), item.get("detail", "")
+            run = run_action("ufw.deny", {"ip": ip}, "nimbus", self.audit)
+            self._call("/api/enforce/report", "POST", {
+                "ip": ip, "action": "ban", "ok": run.get("ok"), "reason": reason,
+                "detail": detail, "response": (run.get("detail") or run.get("error") or "")[:300]})
+            if run.get("ok"):
+                result["banned"].append(ip)
+            else:
+                result.update(ok=False, error="封 %s 失败：%s" % (ip, run.get("error") or run.get("err")))
+        for item in (data.get("unban") or []):
+            ip, reason, detail = item.get("ip"), item.get("reason", ""), item.get("detail", "")
+            run = run_action("ufw.undeny", {"ip": ip}, "nimbus", self.audit)
+            self._call("/api/enforce/report", "POST", {
+                "ip": ip, "action": "unban", "ok": run.get("ok"), "reason": reason,
+                "detail": detail, "response": (run.get("detail") or run.get("error") or "")[:300]})
+            if run.get("ok"):
+                result["unbanned"].append(ip)
+            else:
+                result.update(ok=False, error="解封 %s 失败：%s" % (ip, run.get("error") or run.get("err")))
+        self._remember(result)
+        return result
+
+    def _remember(self, result):
+        with self.lock:
+            self.last = result
+
+    def status(self):
+        with self.lock:
+            last = dict(self.last)
+        return {"enabled": self.enabled, "url": self.url, "interval": self.interval,
+                "last": last,
+                "note": "" if self.enabled else "没配 --enforce-url / --enforce-token，自动封禁关闭"}
+
+    def loop(self):
+        while True:
+            try:
+                self.poll_once()
+            except Exception as e:  # noqa: BLE001
+                self._remember({"ts": int(time.time()), "ok": False, "banned": [], "unbanned": [],
+                                "error": "%s: %s" % (type(e).__name__, e)})
+            time.sleep(self.interval)
+
+
+def list_actions():    return [{"name": k, "label": v["label"], "desc": v["desc"], "danger": v["danger"],
              "params": sorted((v.get("params") or {}).keys())}
             for k, v in sorted(ACTIONS.items())]
 
@@ -1139,6 +1234,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "counts": p.processes.counts()})
             if u.path == "/api/audit":
                 return self._send(200, {"entries": p.audit.tail(int(q.get("lines", ["200"])[0]))})
+            if u.path == "/api/enforce":
+                return self._send(200, self.app["enforcer"].status())
             if u.path == "/api/log":
                 return self._send(200, _tail_file(q.get("path", [""])[0],
                                                   int(q.get("lines", ["200"])[0])))
@@ -1180,6 +1277,12 @@ def main():
     ap.add_argument("--token-file", default="", help="默认 <data-dir>/steward.token")
     ap.add_argument("--data-dir", default="/var/lib/steward", help="token 与审计日志的目录")
     ap.add_argument("--interval", type=float, default=2.0, help="采样间隔（秒）")
+    ap.add_argument("--enforce-url", default=os.environ.get("STEWARD_ENFORCE_URL", ""),
+                    help="从哪个面板拉「该封谁」，例如 http://127.0.0.1:8099（Nimbus）")
+    ap.add_argument("--enforce-token", default=os.environ.get("STEWARD_ENFORCE_TOKEN", ""),
+                    help="上面那个面板的访问 token")
+    ap.add_argument("--enforce-interval", type=int, default=60,
+                    help="拉取间隔（秒），最小 10；0 表示关闭自动封禁")
     args = ap.parse_args()
 
     if args.mode == "demo":
@@ -1208,9 +1311,12 @@ def main():
 
     sampler = Sampler(interval=args.interval, fake=(args.mode == "demo"))
     audit = Audit(data_dir / "audit.log")
+    enforcer = Enforcer(args.enforce_url, args.enforce_token, args.enforce_interval, audit)
+    if args.mode == "demo" or not args.enforce_interval:
+        enforcer.enabled = False
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
-           "started": now_iso()}
+           "started": now_iso(), "enforcer": enforcer}
     Handler.app = app
 
     # 先把端口占住，再起采样线程：反过来的话 systemd 已经报 active、端口却还没监听，
@@ -1218,6 +1324,8 @@ def main():
     httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
     httpd.daemon_threads = True
     sampler.start()
+    if enforcer.enabled:
+        threading.Thread(target=enforcer.loop, daemon=True).start()
     print("=" * 72)
     print("  steward %s  [%s 模式]" % (VERSION, args.mode))
     print("  打开这个地址（已带 token）：http://%s:%d/?token=%s" % (args.bind, args.port, token))
@@ -1228,6 +1336,8 @@ def main():
         print("  systemd：%s   docker：%s" % (
             "可用" if probe.services.available else "不可用",
             "可用" if probe.docker.available else "不可用"))
+        print("  自动封禁：%s" % ("%s（每 %d 秒拉一次）" % (enforcer.url, enforcer.interval)
+                                 if enforcer.enabled else "关闭"))
     print("=" * 72)
     sys.stdout.flush()
     try:

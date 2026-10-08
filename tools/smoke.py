@@ -103,6 +103,62 @@ try:
     ok(len(json.loads(body)["entries"]) >= 1, "动作写进了审计")
     st, body = call("/api/login", "POST", {"token": "错的"})
     ok(st == 403, "错的 token 登不进来")
+
+    print("== 执法器流程（假 Nimbus） ==")
+    sys.path.insert(0, str(ROOT))
+    import http.server
+    import json as _json
+    import threading
+    import steward
+
+    seen = []
+    pending = {"ban": [{"ip": "203.0.113.9", "reason": "ip", "detail": "该 IP 今天激活 11 次"}],
+               "unban": [], "limit": 10, "window": "day"}
+
+    class FakeNimbus(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _out(self, obj):
+            data = _json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path.startswith("/api/enforce/pending"):
+                self._out(pending)
+            else:
+                self._out({"error": "not found"})
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            seen.append(_json.loads(self.rfile.read(n) or b"{}"))
+            self._out({"ok": True})
+
+    fake = http.server.ThreadingHTTPServer(("127.0.0.1", PORT + 1), FakeNimbus)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    try:
+        enf = steward.Enforcer("http://127.0.0.1:%d" % (PORT + 1), "tok", 60,
+                               steward.Audit(workdir / "audit2.log"))
+        res = enf.poll_once()
+        ok(any(s.get("action") == "ban" and s.get("ip") == "203.0.113.9" for s in seen),
+           "把「封这个 IP」回报给了面板：%s" % seen)
+        ok(seen and seen[0].get("ok") is False,
+           "本机没有 ufw，如实回报失败而不是假装成功")
+        ok(res["ok"] is False and "ufw" in _json.dumps(res, ensure_ascii=False),
+           "失败原因带回来了：%s" % res.get("error", "")[:60])
+        ok((workdir / "audit2.log").exists(), "执法经过写进了审计")
+        # 解封路径
+        pending["ban"] = []
+        pending["unban"] = [{"ip": "203.0.113.9", "reason": "ttl", "detail": "已封满 24 小时"}]
+        seen.clear()
+        enf.poll_once()
+        ok(any(s.get("action") == "unban" for s in seen), "解封请求也会被回报回去")
+    finally:
+        fake.shutdown()
 finally:
     proc.terminate()
     try:
