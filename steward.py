@@ -115,6 +115,58 @@ def same_secret(a, b):
     return secrets.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
 
 
+def docker_bridge_addresses():
+    """宿主在 docker 网桥上的地址（docker0 与 br-*）。
+
+    反向代理通常跑在容器里，只能通过网桥网关找宿主 —— 所以面板除了回环，还得在这
+    个地址上听一份。用 ip 命令现场问，网段变了也不怕。
+    """
+    code, out, _ = run(["ip", "-4", "-o", "addr", "show"], timeout=10)
+    addrs = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) > 3 and f[2] == "inet" and (f[1].startswith("br-") or f[1] == "docker0"):
+            addrs.append(f[3].split("/")[0])
+    return addrs
+
+
+def expand_binds(spec):
+    """--bind 支持逗号分隔的多个地址；其中 "docker" 展开成上面的网桥地址。"""
+    out = []
+    for part in str(spec or "127.0.0.1").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part == "docker":
+            out += docker_bridge_addresses()
+        else:
+            out.append(part)
+    uniq = []
+    for a in out:
+        if a not in uniq:
+            uniq.append(a)
+    return uniq or ["127.0.0.1"]
+
+
+def parse_networks(text):
+    import ipaddress
+    nets = []
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            pass
+    return nets
+
+
+def parse_skip(text):
+    """限流永不封禁的网段（默认回环 + 内网）。"""
+    return parse_networks(text)
+
+
 # --------------------------------------------------------------------------
 # 采样：CPU / 内存 / 网络 / 磁盘 / 负载。全部来自 /proc 与 statvfs，不落库
 # --------------------------------------------------------------------------
@@ -1177,6 +1229,43 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         return auth.startswith("Bearer ") and same_secret(auth[7:], tok)
 
+    def _client_ip(self):
+        """审计里记的客户端 IP。
+
+        面板通常挂在反向代理后面，直连方是那个容器（172.x）—— 那样审计里全是
+        "172.18.0.3 干了所有事"，等于没有。所以当直连方在信任网段内时，取
+        X-Forwarded-For 的第一段（最左 = 最原始客户端）。直连方不在信任网段里就
+        完全不看这个头，免得有人伪造。
+        """
+        peer = self.client_address[0]
+        nets = self.app.get("allow_nets") or []
+        if nets:
+            import ipaddress
+            try:
+                addr = ipaddress.ip_address(peer)
+            except ValueError:
+                return peer
+            if not any(addr in n for n in nets):
+                return peer
+        xff = self.headers.get("X-Forwarded-For", "")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        return peer
+
+    def _client_ok(self):
+        """可选的来源白名单（--allow-ip）。绑回环/网桥时它只是第二层；绑 0.0.0.0 时它才是关键。"""
+        nets = self.app.get("allow_nets") or []
+        if not nets:
+            return True
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        return any(addr in n for n in nets)
+
     def _json_body(self):
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -1193,6 +1282,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if not self._client_ok():
+            return self._send(403, {"error": "forbidden", "hint": "来源不在 --allow-ip 白名单里"})
         if u.path in ("/", "/index.html"):
             return self._send(200, (HERE / "ui.html").read_text(encoding="utf-8"),
                               "text/html; charset=utf-8")
@@ -1252,6 +1343,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if not self._client_ok():
+            return self._send(403, {"error": "forbidden", "hint": "来源不在 --allow-ip 白名单里"})
         if u.path == "/api/login":
             tok = str(self._json_body().get("token", "") or "")
             if tok and same_secret(tok, self.app["token"]):
@@ -1260,7 +1353,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed(q):
             return self._send(401, {"error": "unauthorized"})
         body = self._json_body()
-        ip = self.client_address[0]
+        ip = self._client_ip()
         if u.path == "/api/action":
             return self._send(200, run_action(body.get("name", ""), body.get("params") or {}, ip,
                                               self.app["probe"].audit,
@@ -1271,7 +1364,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description="Steward —— Linux 服务器管理面板")
     ap.add_argument("--mode", choices=["demo", "real"], default="real")
-    ap.add_argument("--bind", default="127.0.0.1", help="默认只绑回环，对外交给反向代理")
+    ap.add_argument("--bind", default="127.0.0.1",
+                    help="监听地址，逗号分隔可绑多个；写 docker 表示再绑一份宿主在 docker 网桥上的地址")
+    ap.add_argument("--allow-ip", default=os.environ.get("STEWARD_ALLOW_IP", ""),
+                    help="来源白名单（逗号分隔的网段）；留空 = 不限制，靠绑定地址与 token 守门")
     ap.add_argument("--port", type=int, default=8402)
     ap.add_argument("--token", default="", help="直接给 token（默认从 token 文件读或生成）")
     ap.add_argument("--token-file", default="", help="默认 <data-dir>/steward.token")
@@ -1316,22 +1412,39 @@ def main():
         enforcer.enabled = False
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
-           "started": now_iso(), "enforcer": enforcer}
+           "started": now_iso(), "enforcer": enforcer,
+           "allow_nets": parse_networks(args.allow_ip)}
     Handler.app = app
 
     # 先把端口占住，再起采样线程：反过来的话 systemd 已经报 active、端口却还没监听，
     # 健康检查会踩空（install.sh 的健康检查就踩过一次）。
-    httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
-    httpd.daemon_threads = True
+    servers = []
+    for addr in expand_binds(args.bind):
+        try:
+            srv = ThreadingHTTPServer((addr, args.port), Handler)
+        except OSError as e:
+            print("  !! 绑不上 %s:%d（%s）" % (addr, args.port, e))
+            continue
+        srv.daemon_threads = True
+        servers.append((addr, srv))
+    if not servers:
+        sys.exit("一个地址都没绑上，退出")
+    for _, srv in servers[1:]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
     sampler.start()
     if enforcer.enabled:
         threading.Thread(target=enforcer.loop, daemon=True).start()
     print("=" * 72)
     print("  steward %s  [%s 模式]" % (VERSION, args.mode))
-    print("  打开这个地址（已带 token）：http://%s:%d/?token=%s" % (args.bind, args.port, token))
+    for addr, _ in servers:
+        print("  监听 %s:%d" % (addr, args.port))
+    print("  打开这个地址（已带 token）：http://%s:%d/?token=%s"
+          % (servers[0][0] if servers[0][0] != "0.0.0.0" else "127.0.0.1", args.port, token))
     print("  纯 token：%s" % token)
     print("  忘了 token 就跑：cat %s" % token_file)
     print("  数据目录：%s（审计日志 %s）" % (data_dir, data_dir / "audit.log"))
+    if app["allow_nets"]:
+        print("  来源白名单：%s" % "、".join(str(n) for n in app["allow_nets"]))
     if args.mode == "real":
         print("  systemd：%s   docker：%s" % (
             "可用" if probe.services.available else "不可用",
@@ -1341,7 +1454,7 @@ def main():
     print("=" * 72)
     sys.stdout.flush()
     try:
-        httpd.serve_forever()
+        servers[0][1].serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
 

@@ -15,6 +15,7 @@ DATA_DIR="/var/lib/steward"
 UNIT="/etc/systemd/system/steward.service"
 PORT="8402"
 BIND="127.0.0.1"
+ALLOW_IP=""
 TOKEN=""
 ENFORCE_URL="${STEWARD_ENFORCE_URL:-}"
 ENFORCE_TOKEN="${STEWARD_ENFORCE_TOKEN:-}"
@@ -31,7 +32,9 @@ Steward 安装脚本：把面板装成宿主机上的 systemd 服务。
 
 选项：
   --port N        监听端口（默认 8402）
-  --bind IP       监听地址（默认 127.0.0.1，对外请交给反向代理或 SSH 隧道）
+  --bind IP       监听地址（默认 127.0.0.1）。逗号分隔可绑多个，写 docker 表示
+                  再绑一份宿主在 docker 网桥上的地址（反代在容器里时需要）
+  --allow-ip 网段  来源白名单（逗号分隔）；留空 = 不限制
   --prefix DIR    安装目录（默认 /opt/steward）
   --data-dir DIR  数据目录（默认 /var/lib/steward，放 token 与审计日志）
   --token STR     指定 token（默认随机生成）
@@ -47,6 +50,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="${2:?}"; shift 2 ;;
     --bind) BIND="${2:?}"; shift 2 ;;
+    --allow-ip) ALLOW_IP="${2:?}"; shift 2 ;;
     --prefix) PREFIX="${2:?}"; shift 2 ;;
     --data-dir) DATA_DIR="${2:?}"; shift 2 ;;
     --token) TOKEN="${2:?}"; shift 2 ;;
@@ -125,6 +129,11 @@ if [ -n "$ENFORCE_URL" ] && [ -n "$ENFORCE_TOKEN" ]; then
 else
   echo "    没给 --enforce-url/--enforce-token，自动封禁关闭（面板上仍可手动封禁）"
 fi
+ALLOW_ARGS=""
+if [ -n "$ALLOW_IP" ]; then
+  ALLOW_ARGS=" --allow-ip $ALLOW_IP"
+  echo "    来源白名单：$ALLOW_IP"
+fi
 cat > "$UNIT" <<EOF
 [Unit]
 Description=Steward 服务器管理面板
@@ -134,7 +143,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$PY $PREFIX/steward.py --mode real --bind $BIND --port $PORT --data-dir $DATA_DIR --token-file $DATA_DIR/steward.token$ENFORCE_ARGS
+ExecStart=$PY $PREFIX/steward.py --mode real --bind $BIND --port $PORT --data-dir $DATA_DIR --token-file $DATA_DIR/steward.token$ENFORCE_ARGS$ALLOW_ARGS
 Restart=always
 RestartSec=3
 User=root
@@ -166,8 +175,9 @@ if ! systemctl is-active --quiet steward; then
 fi
 
 # 服务 active 不等于端口在听：面板要先建好采样器才会 bind。等它真的能连上再报成功。
-PROBE_IP="$BIND"
+PROBE_IP="${BIND%%,*}"                 # --bind 可以是逗号列表，拿第一个探活
 [ "$PROBE_IP" = "0.0.0.0" ] && PROBE_IP="127.0.0.1"
+[ "$PROBE_IP" = "docker" ] && PROBE_IP="127.0.0.1"
 printf '==> 等端口 %s:%s 就绪' "$PROBE_IP" "$PORT"
 ready=0
 for _ in $(seq 1 30); do

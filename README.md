@@ -46,6 +46,47 @@ ssh -L 8402:127.0.0.1:8402 root@<服务器 IP>
 
 卸载：`bash install.sh --uninstall`（保留数据）或 `--purge`（连数据一起删）。
 
+## 挂在反向代理后面（可选）
+
+面板默认只监听 `127.0.0.1`。如果反向代理跑在**容器**里（比如 Caddy/Nginx 的 compose），
+它只能通过 docker 网桥的网关找到宿主机，所以要让面板多绑一份网桥地址：
+
+```bash
+sudo bash install.sh --bind 127.0.0.1,docker \
+     --allow-ip 127.0.0.0/8,::1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+```
+
+* `docker` 会在启动时现场查出宿主在 `docker0` / `br-*` 上的地址并一起监听 —— 网段变了
+  也不用改配置。
+* `--allow-ip` 是第二层：只有这些网段能访问，公网直连一律 403（绑了 `0.0.0.0` 时它才是关键）。
+* 还要放行网桥到面板端口的流量，否则 ufw 会把反代的请求一起丢掉：
+
+```bash
+sudo ufw allow from 172.18.0.0/16 to any port 8402 proto tcp   # 网段按实际 compose 网络填
+```
+
+反向代理那边的站点块（以 Caddy 为例）：
+
+```caddyfile
+panel.example.com {
+	encode zstd gzip
+	reverse_proxy 172.18.0.1:8402      # 宿主在网桥上的地址
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options DENY
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}
+```
+
+代理会带上 `X-Forwarded-For`，面板在**直连方属于 `--allow-ip` 网段**时才会采信它，
+所以审计日志里记的是真实客户端 IP，而不是那个容器的地址（伪造的头在网段外会被忽略）。
+
+> 提醒：这样一来面板就在公网上了，token 是唯一的门。不想这样就把域名去掉、继续用
+> SSH 隧道 —— 对一个能启停服务、杀进程、封 IP 的面板来说，隧道其实更合适。
+
 ## 本地预览
 
 没在 Linux 上也能把界面看全 —— 演示模式用一份仿真的 /proc 数据，不碰真实系统：
@@ -58,13 +99,21 @@ python3 steward.py --mode demo --port 8402
 
 ```
 --mode demo|real     演示 / 真机（默认 real）
---bind IP            默认 127.0.0.1
+--bind IP            监听地址，默认 127.0.0.1。逗号分隔可绑多个；写 docker 会额外绑
+                     一份宿主在 docker 网桥上的地址（反向代理在容器里时需要）
+--allow-ip 网段       来源白名单（逗号分隔）；留空 = 不限制
 --port N             默认 8402
 --data-dir DIR       默认 /var/lib/steward（token 与审计日志）
 --token-file PATH    默认 <data-dir>/steward.token
 --token STR          直接指定 token，或用环境变量 STEWARD_TOKEN
 --interval SEC       采样间隔，默认 2
+--enforce-url U      从哪个面板拉「该封谁」（例如 http://127.0.0.1:8099 的 Nimbus）
+--enforce-token T    上面那个面板的 token；给了才会开启自动封禁
+--enforce-interval N 拉取间隔，默认 60 秒，0 = 关闭
 ```
+
+自动封禁执行的仍然是 `ACTIONS` 表里的白名单动作（`ufw.deny` / `ufw.undeny`），
+所以和手动封禁一样会写审计。
 
 ## 设计上的几条硬规矩
 
