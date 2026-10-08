@@ -77,8 +77,14 @@ try:
     print("== 数据形状 ==")
     st, body = call("/api/overview")
     d = json.loads(body)
-    ok(d["cpu"]["percent"] > 0 and d["mem"]["total"] > 0, "概览有 CPU 与内存数据")
-    ok(isinstance(d["series"], list), "有曲线数据")
+    # 演示模式必须是确定性数据（哪怕是 Linux：空闲机器上真实 CPU 可能就是 0.0，
+    # 早先这里断言 percent > 0 在 CI 上偶发失败 —— 那是测试的毛病，不是面板的）
+    ok(d["info"]["hostname"] == "demo-host", "演示模式用的是演示数据")
+    ok(isinstance(d["cpu"]["percent"], (int, float)) and d["cpu"]["percent"] > 0,
+       "概览有 CPU 数据：%s%%" % d["cpu"]["percent"])
+    ok(d["mem"]["total"] > 0 and d["mem"]["percent"] > 0, "概览有内存数据：%.0f MB" % (d["mem"]["total"] >> 20))
+    ok(bool(d["disk"]) and d["disk"][0]["total"] > 0, "概览有磁盘数据")
+    ok(len(d["series"]) >= 1, "有曲线数据（%d 个采样点）" % len(d["series"]))
 
     print("== 安全底线 ==")
     st, _ = call("/api/overview", auth=False)

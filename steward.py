@@ -119,8 +119,9 @@ def same_secret(a, b):
 class Sampler:
     """每隔 interval 秒读一次 /proc，算出 CPU 使用率与网络速率存进环形缓冲。"""
 
-    def __init__(self, interval=2.0, keep=90):
+    def __init__(self, interval=2.0, keep=90, fake=False):
         self.interval = interval
+        self.fake = fake          # 演示模式：即使有 /proc 也用仿真数据，保证演示可复现
         self.samples = collections.deque(maxlen=keep)
         self.lock = threading.Lock()
         self._prev_cpu = None
@@ -271,7 +272,7 @@ class Sampler:
         }
 
     def _snapshot(self):
-        if not os.path.exists("/proc/stat"):
+        if self.fake or not os.path.exists("/proc/stat"):
             snap = self._fake_snapshot()
             self._prev_cpu, self._prev_net = None, None
             return snap
@@ -308,7 +309,7 @@ class Sampler:
 
     def _loop(self):
         # 第一次采样只能拿到基准值（没有差值），所以先采一次再进循环
-        has_proc = os.path.exists("/proc/stat")
+        has_proc = os.path.exists("/proc/stat") and not self.fake
         if has_proc:
             try:
                 self._prev_cpu = self._read_cpu()
@@ -1205,7 +1206,7 @@ def main():
             except OSError as e:
                 sys.exit("token 文件写不了：%s" % e)
 
-    sampler = Sampler(interval=args.interval)
+    sampler = Sampler(interval=args.interval, fake=(args.mode == "demo"))
     audit = Audit(data_dir / "audit.log")
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
