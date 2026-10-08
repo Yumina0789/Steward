@@ -27,7 +27,9 @@ steward —— 单文件、零依赖的 Linux 服务器管理面板（Python 3 �
 """
 
 import argparse
+import base64
 import collections
+import hashlib
 import json
 import math
 import os
@@ -165,6 +167,241 @@ def parse_networks(text):
 def parse_skip(text):
     """限流永不封禁的网段（默认回环 + 内网）。"""
     return parse_networks(text)
+
+
+# --------------------------------------------------------------------------
+# 账户：第一次进来先设一个，之后用户名 + 密码登录
+# --------------------------------------------------------------------------
+PASSWORD_MIN = 8
+SESSION_TTL = 7 * 86400          # 登录态保持 7 天，过期要重新登录
+LOGIN_WINDOW = 300               # 登录失败的统计窗口（秒）
+LOGIN_MAX_FAIL = 8               # 窗口内失败超过这个数就短暂拒绝
+LOGIN_BLOCK = 300                # 拒绝多久
+USER_RE = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
+
+
+def _b64(raw):
+    return base64.b64encode(raw).decode("ascii")
+
+
+def hash_password(password, salt=None):
+    """把密码存成可校验的字符串。
+
+    优先 scrypt（标准库自带、内存硬，比单纯迭代 sha256 抗显卡爆破）；万一这个 Python
+    没编进 scrypt，退回 pbkdf2。算法与参数都写在字符串里，所以将来调参也不会认不出老密码。
+    """
+    salt = salt or os.urandom(16)
+    raw = password.encode("utf-8")
+    if hasattr(hashlib, "scrypt"):
+        n, r, p = 1 << 14, 8, 1
+        dk = hashlib.scrypt(raw, salt=salt, n=n, r=r, p=p, dklen=32)
+        return "scrypt$%d$%d$%d$%s$%s" % (n, r, p, _b64(salt), _b64(dk))
+    iters = 200000
+    dk = hashlib.pbkdf2_hmac("sha256", raw, salt, iters, dklen=32)
+    return "pbkdf2$%d$%s$%s" % (iters, _b64(salt), _b64(dk))
+
+
+def verify_password(password, stored):
+    try:
+        parts = (stored or "").split("$")
+        raw = password.encode("utf-8")
+        if parts[0] == "scrypt" and len(parts) == 6:
+            _, n, r, p, salt_b64, want_b64 = parts
+            salt, want = base64.b64decode(salt_b64), base64.b64decode(want_b64)
+            got = hashlib.scrypt(raw, salt=salt, n=int(n), r=int(r), p=int(p), dklen=len(want))
+        elif parts[0] == "pbkdf2" and len(parts) == 4:
+            _, iters, salt_b64, want_b64 = parts
+            salt, want = base64.b64decode(salt_b64), base64.b64decode(want_b64)
+            got = hashlib.pbkdf2_hmac("sha256", raw, salt, int(iters), dklen=len(want))
+        else:
+            return False
+        return same_secret(got.hex(), want.hex())
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
+class LoginGuard:
+    """给登录失败上摩擦：同一来源在窗口内错太多次就短暂拒绝。
+
+    面板挂在公网上，密码就是唯一的门，没有这个等于把门敞开让人慢慢猜。
+    """
+
+    def __init__(self, window=LOGIN_WINDOW, limit=LOGIN_MAX_FAIL, block=LOGIN_BLOCK):
+        self.window, self.limit, self.block = window, limit, block
+        self.fails = {}
+        self.blocked_until = {}
+        self.lock = threading.Lock()
+
+    def wait_seconds(self, ip):
+        now = time.time()
+        with self.lock:
+            until = self.blocked_until.get(ip, 0)
+            if until > now:
+                return int(until - now) + 1
+            self.blocked_until.pop(ip, None)
+            self.fails[ip] = [t for t in self.fails.get(ip, []) if now - t < self.window]
+            return 0
+
+    def fail(self, ip):
+        now = time.time()
+        with self.lock:
+            hits = [t for t in self.fails.get(ip, []) if now - t < self.window]
+            hits.append(now)
+            self.fails[ip] = hits
+            if len(hits) >= self.limit:
+                self.blocked_until[ip] = now + self.block
+                self.fails[ip] = []
+                return True
+        return False
+
+    def ok(self, ip):
+        with self.lock:
+            self.fails.pop(ip, None)
+            self.blocked_until.pop(ip, None)
+
+
+class Accounts:
+    """账户与会话，存一个 0600 的 JSON 文件。
+
+    不用数据库：这台机器上就一两个人的账户，几十行 JSON 足够；而且万一忘了密码，
+    运维直接看文件就能明白结构、删掉重建。
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.data = {"users": {}, "sessions": {}}
+        self._load()
+
+    # --- 读写 -------------------------------------------------------------
+    def _load(self):
+        try:
+            if self.path.exists():
+                self.data = json.loads(self.path.read_text(encoding="utf-8"))
+                self.data.setdefault("users", {})
+                self.data.setdefault("sessions", {})
+        except (OSError, ValueError):
+            self.data = {"users": {}, "sessions": {}}
+
+    def _save(self):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(self.path) + ".tmp")
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.chmod(str(tmp), 0o600)
+            os.replace(str(tmp), str(self.path))
+        except OSError:
+            pass
+
+    # --- 账户 -------------------------------------------------------------
+    def need_setup(self):
+        with self.lock:
+            return not self.data["users"]
+
+    def names(self):
+        with self.lock:
+            return sorted(self.data["users"])
+
+    def create(self, name, password):
+        name = (name or "").strip()
+        if not USER_RE.match(name):
+            return False, "用户名只能 2~32 位字母、数字、下划线、点或横线"
+        if len(password or "") < PASSWORD_MIN:
+            return False, "密码至少 %d 位" % PASSWORD_MIN
+        with self.lock:
+            if name in self.data["users"]:
+                return False, "这个用户名已经有了"
+            self.data["users"][name] = {"hash": hash_password(password),
+                                        "created": int(time.time()), "last_login": 0}
+            self._save()
+        return True, ""
+
+    def set_password(self, name, password):
+        if len(password or "") < PASSWORD_MIN:
+            return False, "密码至少 %d 位" % PASSWORD_MIN
+        with self.lock:
+            u = self.data["users"].get(name)
+            if not u:
+                return False, "没有这个账户"
+            u["hash"] = hash_password(password)
+            self._save()
+        return True, ""
+
+    def delete(self, name):
+        with self.lock:
+            if name not in self.data["users"]:
+                return False, "没有这个账户"
+            if len(self.data["users"]) <= 1:
+                return False, "这是最后一个账户，删了就没人能登录了"
+            self.data["users"].pop(name)
+            for tok in [t for t, s in self.data["sessions"].items() if s.get("user") == name]:
+                self.data["sessions"].pop(tok, None)
+            self._save()
+        return True, ""
+
+    def check(self, name, password):
+        with self.lock:
+            u = self.data["users"].get((name or "").strip())
+        if not u:
+            # 不存在也照样算一次哈希，别让响应时间暴露"这个用户名存在"
+            verify_password(password or "", hash_password("dummy-password"))
+            return False
+        return verify_password(password or "", u["hash"])
+
+    def touch_login(self, name):
+        with self.lock:
+            if name in self.data["users"]:
+                self.data["users"][name]["last_login"] = int(time.time())
+                self._save()
+
+    def listing(self):
+        with self.lock:
+            sessions = collections.Counter(s.get("user") for s in self.data["sessions"].values())
+            return [{"name": n, "created": u.get("created", 0), "last_login": u.get("last_login", 0),
+                     "sessions": sessions.get(n, 0)}
+                    for n, u in sorted(self.data["users"].items())]
+
+    # --- 会话 -------------------------------------------------------------
+    def new_session(self, name, ttl=SESSION_TTL):
+        tok = secrets.token_urlsafe(32)
+        with self.lock:
+            self.prune_locked()
+            self.data["sessions"][tok] = {"user": name, "created": int(time.time()),
+                                          "expires": int(time.time()) + ttl}
+            self._save()
+        return tok
+
+    def session_user(self, token):
+        if not token:
+            return ""
+        with self.lock:
+            s = self.data["sessions"].get(token)
+            if not s:
+                return ""
+            if s.get("expires", 0) < time.time():
+                self.data["sessions"].pop(token, None)
+                self._save()
+                return ""
+            return s.get("user", "")
+
+    def drop_session(self, token):
+        with self.lock:
+            if self.data["sessions"].pop(token, None):
+                self._save()
+
+    def drop_user_sessions(self, name):
+        with self.lock:
+            victims = [t for t, s in self.data["sessions"].items() if s.get("user") == name]
+            for t in victims:
+                self.data["sessions"].pop(t, None)
+            if victims:
+                self._save()
+        return len(victims)
+
+    def prune_locked(self):
+        now = time.time()
+        for t in [t for t, s in self.data["sessions"].items() if s.get("expires", 0) < now]:
+            self.data["sessions"].pop(t, None)
 
 
 # --------------------------------------------------------------------------
@@ -1222,12 +1459,34 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def _authed(self, q):
-        tok = self.app["token"]
-        if q.get("token", [None])[0] == tok:
-            return True
+    def _bearer(self):
         auth = self.headers.get("Authorization", "")
-        return auth.startswith("Bearer ") and same_secret(auth[7:], tok)
+        return auth[7:].strip() if auth.startswith("Bearer ") else ""
+
+    def _authed(self, q):
+        """两种凭证：① 登录后发的会话令牌（浏览器）② 服务 token（机器）。
+
+        服务 token 必须留着：Steward 每 60 秒要拿它去 Nimbus 拉限流决策，
+        那种调用没法让人登录。它存在 0600 的文件里，只给机器用。
+        """
+        if q.get("token", [None])[0] == self.app["token"]:
+            return True
+        cred = self._bearer()
+        if not cred:
+            return False
+        if self.app["accounts"].session_user(cred):
+            return True
+        return same_secret(cred, self.app["token"])
+
+    def _user(self):
+        """当前登录的账户名；用服务 token 进来的是 "(服务 token)"。"""
+        cred = self._bearer()
+        if not cred:
+            return ""
+        u = self.app["accounts"].session_user(cred)
+        if u:
+            return u
+        return "(服务 token)" if same_secret(cred, self.app["token"]) else ""
 
     def _client_ip(self):
         """审计里记的客户端 IP。
@@ -1292,8 +1551,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "real": self.app["probe"].real, "started": self.app["started"],
                                     "interval": self.app["sampler"].interval,
                                     "actions": list_actions()})
+        if u.path == "/api/auth":
+            acc = self.app["accounts"]
+            return self._send(200, {"need_setup": acc.need_setup(), "users": acc.names(),
+                                    "password_min": PASSWORD_MIN, "session_ttl": SESSION_TTL,
+                                    "service_token": True, "me": self._user()})
         if not self._authed(q):
-            return self._send(401, {"error": "unauthorized", "hint": "需要 token"})
+            return self._send(401, {"error": "unauthorized", "hint": "需要登录"})
         p = self.app["probe"]
         try:
             if u.path == "/api/overview":
@@ -1327,6 +1591,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"entries": p.audit.tail(int(q.get("lines", ["200"])[0]))})
             if u.path == "/api/enforce":
                 return self._send(200, self.app["enforcer"].status())
+            if u.path == "/api/accounts":
+                return self._send(200, {"users": self.app["accounts"].listing(),
+                                        "me": self._user()})
             if u.path == "/api/log":
                 return self._send(200, _tail_file(q.get("path", [""])[0],
                                                   int(q.get("lines", ["200"])[0])))
@@ -1345,15 +1612,75 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if not self._client_ok():
             return self._send(403, {"error": "forbidden", "hint": "来源不在 --allow-ip 白名单里"})
+        acc = self.app["accounts"]
+        ip = self._client_ip()
+
+        # --- 不需要登录的两个入口 -----------------------------------------
+        if u.path == "/api/setup":
+            if not acc.need_setup():
+                return self._send(403, {"ok": False, "error": "已经有账户了，请直接登录"})
+            body = self._json_body()
+            name = (body.get("name") or "").strip()
+            ok, err = acc.create(name, body.get("password") or "")
+            if not ok:
+                return self._send(400, {"ok": False, "error": err})
+            acc.touch_login(name)
+            self.app["audit"].write("account.setup", name, True, "首次设置账户", ip)
+            return self._send(200, {"ok": True, "session": acc.new_session(name), "name": name})
         if u.path == "/api/login":
-            tok = str(self._json_body().get("token", "") or "")
-            if tok and same_secret(tok, self.app["token"]):
-                return self._send(200, {"ok": True, "token": self.app["token"]})
-            return self._send(403, {"ok": False, "error": "token 不正确"})
+            wait = self.app["guard"].wait_seconds(ip)
+            if wait:
+                return self._send(429, {"ok": False, "error": "登录失败次数太多，请 %d 秒后再试" % wait})
+            body = self._json_body()
+            name = (body.get("name") or "").strip()
+            if acc.check(name, body.get("password") or ""):
+                self.app["guard"].ok(ip)
+                acc.touch_login(name)
+                self.app["audit"].write("account.login", name, True, "", ip)
+                return self._send(200, {"ok": True, "session": acc.new_session(name), "name": name})
+            blocked = self.app["guard"].fail(ip)
+            self.app["audit"].write("account.login", name or "(空)", False,
+                                    "密码错误" + ("，已临时拒绝该来源" if blocked else ""), ip)
+            return self._send(403, {"ok": False, "error": "用户名或密码不对"})
+
+        # --- 以下都要已登录 -----------------------------------------------
         if not self._authed(q):
             return self._send(401, {"error": "unauthorized"})
         body = self._json_body()
-        ip = self._client_ip()
+        me = self._user()
+
+        if u.path == "/api/logout":
+            acc.drop_session(self._bearer())
+            return self._send(200, {"ok": True})
+        if u.path == "/api/accounts/create":
+            name = (body.get("name") or "").strip()
+            ok, err = acc.create(name, body.get("password") or "")
+            self.app["audit"].write("account.create", name, ok, err or "", ip)
+            return self._send(200 if ok else 400,
+                              {"ok": ok, "error": err, "users": acc.listing()})
+        if u.path == "/api/accounts/password":
+            # 改谁的密码都行，但必须拿"你自己当前的密码"确认一次 —— 免得一个会话被
+            # 偷走就能静默接管所有账户
+            if me == "(服务 token)" or not acc.check(me, body.get("actor_password") or ""):
+                self.app["audit"].write("account.password", body.get("name") or me, False,
+                                        "当前密码校验失败", ip)
+                return self._send(403, {"ok": False, "error": "请输入你自己当前的密码"})
+            target = (body.get("name") or me).strip()
+            ok, err = acc.set_password(target, body.get("password") or "")
+            if ok:
+                acc.drop_user_sessions(target)      # 改完密码让旧会话全部失效
+            self.app["audit"].write("account.password", target, ok, err or "", ip)
+            return self._send(200 if ok else 400, {"ok": ok, "error": err})
+        if u.path == "/api/accounts/delete":
+            target = (body.get("name") or "").strip()
+            ok, err = acc.delete(target)
+            self.app["audit"].write("account.delete", target, ok, err or "", ip)
+            return self._send(200 if ok else 400,
+                              {"ok": ok, "error": err, "users": acc.listing()})
+        if u.path == "/api/accounts/logout-all":
+            n = acc.drop_user_sessions(me) if me and me != "(服务 token)" else 0
+            self.app["audit"].write("account.logout_all", me, True, "退出 %d 个会话" % n, ip)
+            return self._send(200, {"ok": True, "dropped": n})
         if u.path == "/api/action":
             return self._send(200, run_action(body.get("name", ""), body.get("params") or {}, ip,
                                               self.app["probe"].audit,
@@ -1362,6 +1689,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # 控制台编码可能是 GBK / ASCII（Windows、LANG=C 的 Linux 都是），一句中文横幅就能
+    # 让整个面板起不来。先把输出通道统一成 UTF-8 且遇错不炸。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
     ap = argparse.ArgumentParser(description="Steward —— Linux 服务器管理面板")
     ap.add_argument("--mode", choices=["demo", "real"], default="real")
     ap.add_argument("--bind", default="127.0.0.1",
@@ -1407,13 +1741,14 @@ def main():
 
     sampler = Sampler(interval=args.interval, fake=(args.mode == "demo"))
     audit = Audit(data_dir / "audit.log")
+    accounts = Accounts(data_dir / "accounts.json")
     enforcer = Enforcer(args.enforce_url, args.enforce_token, args.enforce_interval, audit)
     if args.mode == "demo" or not args.enforce_interval:
         enforcer.enabled = False
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
-           "started": now_iso(), "enforcer": enforcer,
-           "allow_nets": parse_networks(args.allow_ip)}
+           "started": now_iso(), "enforcer": enforcer, "accounts": accounts, "audit": audit,
+           "guard": LoginGuard(), "allow_nets": parse_networks(args.allow_ip)}
     Handler.app = app
 
     # 先把端口占住，再起采样线程：反过来的话 systemd 已经报 active、端口却还没监听，
@@ -1440,9 +1775,13 @@ def main():
         print("  监听 %s:%d" % (addr, args.port))
     print("  打开这个地址（已带 token）：http://%s:%d/?token=%s"
           % (servers[0][0] if servers[0][0] != "0.0.0.0" else "127.0.0.1", args.port, token))
-    print("  纯 token：%s" % token)
+    print("  纯 token：%s（机器凭证，浏览器改用账户登录）" % token)
     print("  忘了 token 就跑：cat %s" % token_file)
     print("  数据目录：%s（审计日志 %s）" % (data_dir, data_dir / "audit.log"))
+    if accounts.need_setup():
+        print("  注意：还没有账户，打开页面先设置账户名与密码")
+    else:
+        print("  账户：%s（改密码在面板的「账户」页）" % "、".join(accounts.names()))
     if app["allow_nets"]:
         print("  来源白名单：%s" % "、".join(str(n) for n in app["allow_nets"]))
     if args.mode == "real":
