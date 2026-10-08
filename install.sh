@@ -142,12 +142,31 @@ EOF
 systemctl daemon-reload
 systemctl enable --now steward
 sleep 1
-if systemctl is-active --quiet steward; then
-  echo "==> 起来了"
-else
-  echo "!! 没起来，看日志：journalctl -u steward -n 50 --no-pager" >&2
+if ! systemctl is-active --quiet steward; then
+  echo "!! 服务没起来，看日志：journalctl -u steward -n 50 --no-pager" >&2
   exit 1
 fi
+
+# 服务 active 不等于端口在听：面板要先建好采样器才会 bind。等它真的能连上再报成功。
+PROBE_IP="$BIND"
+[ "$PROBE_IP" = "0.0.0.0" ] && PROBE_IP="127.0.0.1"
+printf '==> 等端口 %s:%s 就绪' "$PROBE_IP" "$PORT"
+ready=0
+for _ in $(seq 1 30); do
+  if (exec 3<>"/dev/tcp/$PROBE_IP/$PORT") 2>/dev/null; then
+    exec 3<&- 2>/dev/null || true
+    ready=1
+    break
+  fi
+  printf '.'
+  sleep 0.5
+done
+printf '\n'
+if [ "$ready" != "1" ]; then
+  echo "!! 端口没起来，看日志：journalctl -u steward -n 50 --no-pager" >&2
+  exit 1
+fi
+echo "==> 服务在跑，端口已就绪"
 
 cat <<EOF
 

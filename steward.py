@@ -185,15 +185,19 @@ class Sampler:
 
     @staticmethod
     def _read_disk():
-        out, seen = [], set()
+        """一个 (设备, 文件系统) 只留一条。
+
+        真机上 /、/etc、/home、/root 常常是同一个分区的 bind mount，全列出来只是
+        把同一个数字重复八遍。取挂载路径最短的那个（通常是 /）。
+        """
+        out = {}
         for line in read_text("/proc/mounts").splitlines():
             f = line.split()
             if len(f) < 3:
                 continue
             dev, mount, fstype = f[0], f[1].replace("\\040", " "), f[2]
-            if fstype not in REAL_FS or mount in seen:
+            if fstype not in REAL_FS or not dev.startswith("/dev/"):
                 continue
-            seen.add(mount)
             try:
                 st = os.statvfs(mount)
             except OSError:
@@ -204,14 +208,18 @@ class Sampler:
             free = st.f_bavail * st.f_frsize
             used = total - st.f_bfree * st.f_frsize
             inodes = st.f_files
-            out.append({
+            entry = {
                 "mount": mount, "device": dev, "fstype": fstype,
                 "total": total, "used": used, "free": free,
                 "percent": (used / total * 100) if total else 0,
                 "inodes_total": inodes,
                 "inodes_percent": ((inodes - st.f_ffree) / inodes * 100) if inodes else 0,
-            })
-        return sorted(out, key=lambda d: -d["total"])
+            }
+            key = (dev, fstype)
+            old = out.get(key)
+            if old is None or len(mount) < len(old["mount"]):
+                out[key] = entry
+        return sorted(out.values(), key=lambda d: -d["total"])
 
     @staticmethod
     def _read_proc_count():
@@ -309,21 +317,21 @@ class Sampler:
             except Exception:  # noqa: BLE001
                 pass
         while not self._stopped:
-            time.sleep(self.interval)
             try:
+                # 先采一次再睡：否则开局几秒里 latest() 是空的，界面一片 0
                 snap = self._snapshot()
                 with self.lock:
                     self.samples.append(snap)
             except Exception:  # noqa: BLE001
                 pass
+            time.sleep(self.interval)
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
-        # 等第一个真实采样，别让界面开局就是空的
         for _ in range(40):
             if self.latest():
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
 
     def latest(self):
         with self.lock:
@@ -1198,15 +1206,17 @@ def main():
                 sys.exit("token 文件写不了：%s" % e)
 
     sampler = Sampler(interval=args.interval)
-    sampler.start()
     audit = Audit(data_dir / "audit.log")
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
            "started": now_iso()}
     Handler.app = app
 
+    # 先把端口占住，再起采样线程：反过来的话 systemd 已经报 active、端口却还没监听，
+    # 健康检查会踩空（install.sh 的健康检查就踩过一次）。
     httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
     httpd.daemon_threads = True
+    sampler.start()
     print("=" * 72)
     print("  steward %s  [%s 模式]" % (VERSION, args.mode))
     print("  打开这个地址（已带 token）：http://%s:%d/?token=%s" % (args.bind, args.port, token))
