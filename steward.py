@@ -175,8 +175,12 @@ def parse_skip(text):
 PASSWORD_MIN = 8
 SESSION_TTL = 7 * 86400          # 登录态保持 7 天，过期要重新登录
 LOGIN_WINDOW = 300               # 登录失败的统计窗口（秒）
-LOGIN_MAX_FAIL = 8               # 窗口内失败超过这个数就短暂拒绝
-LOGIN_BLOCK = 300                # 拒绝多久
+LOGIN_MAX_FAIL = 8               # 窗口内失败超过这个数就封
+# 递增封禁：第一次 5 分钟，再犯 30 分钟，第三次起 6 小时。
+# 24 小时内没再犯就降回第一档；成功登录直接清零 —— 正常用户打错几次密码不会把自己
+# 越封越久，而持续爆破的家伙会一路封到 6 小时。
+LOGIN_BLOCK_TIERS = (300, 1800, 21600)
+LOGIN_FORGET = 86400
 USER_RE = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
 
 
@@ -221,43 +225,128 @@ def verify_password(password, stored):
 
 
 class LoginGuard:
-    """给登录失败上摩擦：同一来源在窗口内错太多次就短暂拒绝。
+    """登录失败的摩擦：同一来源在窗口内错太多次就封，而且**一次比一次久**。
 
-    面板挂在公网上，密码就是唯一的门，没有这个等于把门敞开让人慢慢猜。
+    * 只按来源 IP 算，不按账户 —— 攻击者没法把你锁在门外，你打错密码也不连累自己。
+    * 状态落盘到 loginguard.json（0600）：重启面板不该等于替攻击者清空记录。
+    * 成功登录清零；24 小时没再犯也降回第一档。所以只有"持续爆破"才会被封到 6 小时。
     """
 
-    def __init__(self, window=LOGIN_WINDOW, limit=LOGIN_MAX_FAIL, block=LOGIN_BLOCK):
-        self.window, self.limit, self.block = window, limit, block
-        self.fails = {}
-        self.blocked_until = {}
+    def __init__(self, path=None, window=LOGIN_WINDOW, limit=LOGIN_MAX_FAIL,
+                 tiers=LOGIN_BLOCK_TIERS, forget=LOGIN_FORGET):
+        self.path = Path(path) if path else None
+        self.window, self.limit, self.tiers, self.forget = window, limit, tiers, forget
         self.lock = threading.Lock()
+        self.state = {"ips": {}}      # ip -> {fails: [ts], blocked_until, level, last}
+        self._load()
+
+    # --- 落盘 -------------------------------------------------------------
+    def _load(self):
+        if not self.path:
+            return
+        try:
+            if self.path.exists():
+                d = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(d, dict) and isinstance(d.get("ips"), dict):
+                    self.state = d
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        if not self.path:
+            return
+        try:
+            tmp = Path(str(self.path) + ".tmp")
+            tmp.write_text(json.dumps(self.state, ensure_ascii=False), encoding="utf-8")
+            os.chmod(str(tmp), 0o600)
+            os.replace(str(tmp), str(self.path))
+        except OSError:
+            pass
+
+    # --- 判定 -------------------------------------------------------------
+    def _entry(self, ip):
+        e = self.state["ips"].get(ip)
+        if not isinstance(e, dict):
+            e = {"fails": [], "blocked_until": 0, "level": 0, "last": 0}
+            self.state["ips"][ip] = e
+        return e
 
     def wait_seconds(self, ip):
+        """还要等多少秒才能再试；0 = 现在可以试。"""
         now = time.time()
         with self.lock:
-            until = self.blocked_until.get(ip, 0)
+            e = self._entry(ip)
+            until = float(e.get("blocked_until") or 0)
             if until > now:
                 return int(until - now) + 1
-            self.blocked_until.pop(ip, None)
-            self.fails[ip] = [t for t in self.fails.get(ip, []) if now - t < self.window]
+            e["blocked_until"] = 0
+            e["fails"] = [t for t in (e.get("fails") or []) if now - t < self.window]
+            if e.get("last") and now - e["last"] > self.forget:
+                e["level"] = 0                                      # 很久没犯，档位降回去
             return 0
 
     def fail(self, ip):
+        """记一次失败。返回 (是否被封, 封多久秒, 第几档)。"""
         now = time.time()
         with self.lock:
-            hits = [t for t in self.fails.get(ip, []) if now - t < self.window]
+            e = self._entry(ip)
+            hits = [t for t in (e.get("fails") or []) if now - t < self.window]
             hits.append(now)
-            self.fails[ip] = hits
+            e["fails"] = hits
+            e["last"] = now
+            blocked, secs = False, 0
             if len(hits) >= self.limit:
-                self.blocked_until[ip] = now + self.block
-                self.fails[ip] = []
-                return True
-        return False
+                e["level"] = min(int(e.get("level") or 0) + 1, len(self.tiers))
+                secs = self.tiers[e["level"] - 1]
+                e["blocked_until"] = now + secs
+                e["fails"] = []
+                blocked = True
+            self._prune(now)
+            self._save()
+            return blocked, secs, int(e.get("level") or 0)
 
     def ok(self, ip):
+        """登录成功：这个来源的记录整个清掉。"""
         with self.lock:
-            self.fails.pop(ip, None)
-            self.blocked_until.pop(ip, None)
+            if self.state["ips"].pop(ip, None):
+                self._save()
+
+    def unblock(self, ip):
+        """人工解封：放行这个来源，但**保留档位**——解封不等于给攻击者重置计数。"""
+        with self.lock:
+            e = self.state["ips"].get(ip)
+            if not isinstance(e, dict):
+                return False
+            was = float(e.get("blocked_until") or 0) > time.time()
+            e["blocked_until"] = 0
+            e["fails"] = []
+            if was:
+                self._save()
+            return was
+
+    def _prune(self, now):
+        """别让文件无限长：很久没动静、又没在封禁中的来源直接忘掉。"""
+        for k in [k for k, v in self.state["ips"].items()
+                  if isinstance(v, dict) and now - float(v.get("last") or 0) > self.forget * 7
+                  and float(v.get("blocked_until") or 0) < now]:
+            self.state["ips"].pop(k, None)
+
+    def status(self, limit=20):
+        now = time.time()
+        rows = []
+        with self.lock:
+            for ip, e in self.state["ips"].items():
+                if not isinstance(e, dict):
+                    continue
+                until = float(e.get("blocked_until") or 0)
+                if until > now:
+                    rows.append({"ip": ip, "seconds": int(until - now),
+                                 "level": int(e.get("level") or 0),
+                                 "fails": len(e.get("fails") or [])})
+        rows.sort(key=lambda r: -r["seconds"])
+        return {"blocked": rows[:limit], "tracked": len(self.state["ips"]),
+                "tiers": [int(t) for t in self.tiers], "limit": self.limit,
+                "window": self.window}
 
 
 class Accounts:
@@ -1565,9 +1654,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "actions": list_actions()})
         if u.path == "/api/auth":
             acc = self.app["accounts"]
-            return self._send(200, {"need_setup": acc.need_setup(), "users": acc.names(),
+            me = self._user()
+            return self._send(200, {"need_setup": acc.need_setup(),
                                     "password_min": PASSWORD_MIN, "session_ttl": SESSION_TTL,
-                                    "service_token": True, "me": self._user()})
+                                    "service_token": True, "me": me,
+                                    # 没登录就不告诉你都有哪些用户名 —— 否则等于替攻击者
+                                    # 把"猜用户名"这一步做了
+                                    "users": acc.names() if me else []})
         if not self._authed(q):
             return self._send(401, {"error": "unauthorized", "hint": "需要登录"})
         p = self.app["probe"]
@@ -1605,7 +1698,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app["enforcer"].status())
             if u.path == "/api/accounts":
                 return self._send(200, {"users": self.app["accounts"].listing(),
-                                        "me": self._user()})
+                                        "me": self._user(),
+                                        "guard": self.app["guard"].status()})
             if u.path == "/api/log":
                 return self._send(200, _tail_file(q.get("path", [""])[0],
                                                   int(q.get("lines", ["200"])[0])))
@@ -1650,9 +1744,10 @@ class Handler(BaseHTTPRequestHandler):
                 acc.touch_login(name)
                 self.app["audit"].write("account.login", name, True, "", ip)
                 return self._send(200, {"ok": True, "session": acc.new_session(name), "name": name})
-            blocked = self.app["guard"].fail(ip)
+            blocked, secs, level = self.app["guard"].fail(ip)
             self.app["audit"].write("account.login", name or "(空)", False,
-                                    "密码错误" + ("，已临时拒绝该来源" if blocked else ""), ip)
+                                    "密码错误" + ("，已封禁 %d 秒（第 %d 档）" % (secs, level)
+                                                  if blocked else ""), ip)
             return self._send(403, {"ok": False, "error": "用户名或密码不对"})
 
         # --- 以下都要已登录 -----------------------------------------------
@@ -1693,6 +1788,18 @@ class Handler(BaseHTTPRequestHandler):
             n = acc.drop_user_sessions(me) if me and me != "(服务 token)" else 0
             self.app["audit"].write("account.logout_all", me, True, "退出 %d 个会话" % n, ip)
             return self._send(200, {"ok": True, "dropped": n})
+        if u.path == "/api/accounts/unblock":
+            # 自己手滑输错密码把自己封了，或者误封了好人：给一条明确的解封路。
+            # 档位不清零，所以解封不等于给攻击者重置计数。
+            try:
+                who = _val_ip(body.get("ip"))
+            except ValueError as e:
+                return self._send(400, {"ok": False, "error": str(e)})
+            cleared = self.app["guard"].unblock(who)
+            self.app["audit"].write("account.unblock", who, True,
+                                    "解封登录限流" if cleared else "本来就没封", ip)
+            return self._send(200, {"ok": True, "cleared": cleared,
+                                    "guard": self.app["guard"].status()})
         if u.path == "/api/action":
             return self._send(200, run_action(body.get("name", ""), body.get("params") or {}, ip,
                                               self.app["probe"].audit,
@@ -1760,7 +1867,8 @@ def main():
     probe = DemoProbe(sampler, audit) if args.mode == "demo" else HostProbe(sampler, audit)
     app = {"probe": probe, "sampler": sampler, "token": token, "mode": args.mode,
            "started": now_iso(), "enforcer": enforcer, "accounts": accounts, "audit": audit,
-           "guard": LoginGuard(), "allow_nets": parse_networks(args.allow_ip)}
+           "guard": LoginGuard(data_dir / "loginguard.json"),
+           "allow_nets": parse_networks(args.allow_ip)}
     Handler.app = app
 
     # 先把端口占住，再起采样线程：反过来的话 systemd 已经报 active、端口却还没监听，

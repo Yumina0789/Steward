@@ -197,6 +197,40 @@ try:
     st, body = call("/api/login", "POST", {"name": USER, "password": PASS}, auth=False)
     ok(st == 403 or st == 429, "还在限流冷却里，登录仍被挡（%s）" % st)
 
+    print("== 递增封禁：一次比一次久，且重启不丢 ==")
+    # 刚才已经退出登录了，这一段改用服务 token —— 也正是「自己被封了怎么救」的正规姿势
+    st, body = call("/api/accounts", cred=TOKEN)
+    g = json.loads(body).get("guard") or {}
+    ok(g.get("tiers") == [300, 1800, 21600], "档位是 5 分钟 → 30 分钟 → 6 小时：%s" % g.get("tiers"))
+    first = (g.get("blocked") or [{}])[0]
+    ok(first.get("level") == 1, "第一次犯满就封第 1 档：%s" % first)
+    ok((workdir / "loginguard.json").exists(), "封禁状态落在 loginguard.json（重启不清零）")
+
+    # 递增与「解封保留档位」直接拿类来试，不然得真等 5 分钟
+    sys.path.insert(0, str(ROOT))
+    import steward
+    unit = steward.LoginGuard(workdir / "guard-unit.json", window=300, limit=2, tiers=(1, 2, 3))
+    ok(unit.fail("203.0.113.5")[0] is False, "没到次数不封")
+    b2 = unit.fail("203.0.113.5")
+    ok(b2[0] and b2[1] == 1 and b2[2] == 1, "犯满触发第 1 档：%s" % (b2,))
+    unit.unblock("203.0.113.5")
+    unit.fail("203.0.113.5")
+    b4 = unit.fail("203.0.113.5")
+    ok(b4[0] and b4[1] == 2 and b4[2] == 2, "解封后档位保留，再犯直接第 2 档（更久）：%s" % (b4,))
+    again = steward.LoginGuard(workdir / "guard-unit.json", window=300, limit=2, tiers=(1, 2, 3))
+    ok(again.wait_seconds("203.0.113.5") > 0, "换一个实例重新读文件，封禁还在（重启不清零）")
+    again.ok("203.0.113.5")
+    ok(again.wait_seconds("203.0.113.5") == 0, "登录成功后这个来源的记录整个清掉")
+
+    print("== 解封接口 ==")
+    st, body = call("/api/accounts/unblock", "POST", {"ip": "127.0.0.1"}, cred=TOKEN)
+    d = json.loads(body)
+    ok(st == 200 and d.get("ok") and d.get("cleared") is True, "服务 token 能解封被封的来源：cleared=%s" % d.get("cleared"))
+    st, body = call("/api/login", "POST", {"name": USER, "password": PASS}, auth=False)
+    ok(st == 200 and json.loads(body).get("session"), "解封之后正确密码立刻能登录")
+    st, _ = call("/api/accounts/unblock", "POST", {"ip": "不是IP"}, cred=TOKEN)
+    ok(st == 400, "非法 IP 被拒")
+
     print("== 执法器流程（假 Nimbus） ==")
     sys.path.insert(0, str(ROOT))
     import http.server
