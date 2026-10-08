@@ -147,9 +147,11 @@ try:
         ok(any(s.get("action") == "ban" and s.get("ip") == "203.0.113.9" for s in seen),
            "把「封这个 IP」回报给了面板：%s" % seen)
         ok(seen and seen[0].get("ok") is False,
-           "本机没有 ufw，如实回报失败而不是假装成功")
-        ok(res["ok"] is False and "ufw" in _json.dumps(res, ensure_ascii=False),
-           "失败原因带回来了：%s" % res.get("error", "")[:60])
+           "本机封不了（没 ufw 或不是 root）时如实回报失败，不假装成功")
+        # 只断言「失败必须带原因」，别断言具体文案 —— 不同环境差别很大
+        # （Windows 没 ufw 是「找不到命令」，CI 上装了 ufw 但不是 root 是「You need to be root」）
+        ok(res["ok"] is False and bool(res.get("error")),
+           "失败原因如实带回来了：%s" % (res.get("error") or "")[:70])
         ok((workdir / "audit2.log").exists(), "执法经过写进了审计")
         # 解封路径
         pending["ban"] = []
